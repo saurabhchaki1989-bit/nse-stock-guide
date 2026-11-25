@@ -15,38 +15,43 @@ import streamlit as st
 import yfinance as yf
 
 st.set_page_config(
-    page_title="NSE/BSE Live Stocks, SIPs & Gold",
+    page_title="NSE/BSE Live Stocks, Quick Wins, SIPs & Gold",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
+
+def render_html(markup: str):
+    """Strips blank lines & leading spaces so Streamlit NEVER renders HTML as a code block."""
+    cleaned = "\n".join(line.strip() for line in markup.splitlines() if line.strip())
+    st.markdown(cleaned, unsafe_allow_html=True)
+
+
 # ------------------------------------------------------------------------------
-# MODERN MOBILE-FIRST + DESKTOP RESPONSIVE CSS (LIGHT & DARK MODE FRIENDLY)
+# MODERN MOBILE-FIRST + DESKTOP RESPONSIVE CSS
 # ------------------------------------------------------------------------------
-st.markdown(
+render_html(
     """
     <style>
-    /* Tighten page spacing for mobile & desktop */
     .block-container {
-        padding-top: 1rem !important;
-        padding-bottom: 2rem !important;
+        padding-top: 3.5rem !important;
+        padding-bottom: 2.5rem !important;
         padding-left: 0.9rem !important;
         padding-right: 0.9rem !important;
         max-width: 1250px;
     }
 
-    /* Clean compact app header */
     .app-header {
         display: flex;
         align-items: center;
         justify-content: space-between;
         flex-wrap: wrap;
         gap: 8px;
-        margin-bottom: 0.4rem;
+        margin-bottom: 0.5rem;
     }
     .app-title {
-        font-size: 1.45rem;
+        font-size: 1.42rem;
         font-weight: 800;
         margin: 0;
         letter-spacing: -0.3px;
@@ -59,26 +64,27 @@ st.markdown(
         border-radius: 999px;
         font-size: 0.78rem;
         font-weight: 600;
+        white-space: nowrap;
     }
     .status-open { background: rgba(22, 163, 74, 0.14); color: #16a34a; border: 1px solid rgba(22, 163, 74, 0.3); }
-    .status-closed { background: rgba(100, 116, 139, 0.14); color: #64748b; border: 1px solid rgba(100, 116, 139, 0.3); }
+    .status-closed { background: rgba(220, 38, 38, 0.10); color: #dc2626; border: 1px solid rgba(220, 38, 38, 0.28); }
 
-    /* Compact section headings */
-    .sec-title {
-        font-size: 1.1rem;
-        font-weight: 700;
-        margin: 0.8rem 0 0.25rem 0;
-    }
-    .sec-sub {
-        font-size: 0.8rem;
-        opacity: 0.72;
+    .frozen-banner {
+        background: rgba(100, 116, 139, 0.11);
+        border: 1px solid rgba(100, 116, 139, 0.28);
+        border-radius: 10px;
+        padding: 9px 13px;
+        font-size: 0.82rem;
+        font-weight: 600;
         margin-bottom: 0.65rem;
     }
 
-    /* Responsive Fintech Card Grid (1 col on Mobile, 2-3 cols on Desktop) */
+    .sec-title { font-size: 1.08rem; font-weight: 700; margin: 0.85rem 0 0.25rem 0; }
+    .sec-sub { font-size: 0.79rem; opacity: 0.72; margin-bottom: 0.65rem; }
+
     .card-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(285px, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
         gap: 10px;
         margin-bottom: 0.8rem;
     }
@@ -89,18 +95,14 @@ st.markdown(
         margin-bottom: 0.8rem;
     }
     @media (min-width: 769px) {
-        .grid-2col-desktop4 {
-            grid-template-columns: repeat(4, 1fr);
-        }
+        .grid-2col-desktop4 { grid-template-columns: repeat(4, 1fr); }
     }
 
-    /* Modern Stock / MF Card */
     .fin-card {
         background: rgba(128, 128, 128, 0.055);
         border: 1px solid rgba(128, 128, 128, 0.20);
         border-radius: 14px;
         padding: 12px 14px;
-        transition: border-color 0.2s ease;
     }
     .fin-row {
         display: flex;
@@ -108,31 +110,20 @@ st.markdown(
         align-items: flex-start;
         gap: 8px;
     }
-    .fin-name {
-        font-weight: 700;
-        font-size: 0.96rem;
-        line-height: 1.25;
-    }
-    .fin-meta {
-        font-size: 0.75rem;
-        opacity: 0.7;
-        margin-top: 2px;
-    }
-    .fin-price {
-        font-weight: 800;
-        font-size: 1.08rem;
-        text-align: right;
-        white-space: nowrap;
-    }
+    .fin-name { font-weight: 700; font-size: 0.96rem; line-height: 1.25; }
+    .fin-meta { font-size: 0.75rem; opacity: 0.74; margin-top: 2px; }
+    .fin-price { font-weight: 800; font-size: 1.08rem; text-align: right; white-space: nowrap; }
+
     .pill-up {
         display: inline-block;
         background: rgba(22, 163, 74, 0.14);
         color: #16a34a;
         padding: 2px 7px;
         border-radius: 6px;
-        font-size: 0.74rem;
+        font-size: 0.73rem;
         font-weight: 700;
         margin-top: 3px;
+        white-space: nowrap;
     }
     .pill-down {
         display: inline-block;
@@ -140,9 +131,10 @@ st.markdown(
         color: #dc2626;
         padding: 2px 7px;
         border-radius: 6px;
-        font-size: 0.74rem;
+        font-size: 0.73rem;
         font-weight: 700;
         margin-top: 3px;
+        white-space: nowrap;
     }
     .pill-tag {
         display: inline-block;
@@ -150,62 +142,67 @@ st.markdown(
         border: 1px solid rgba(59, 130, 246, 0.25);
         padding: 3px 8px;
         border-radius: 8px;
-        font-size: 0.74rem;
+        font-size: 0.73rem;
         font-weight: 600;
+        margin-top: 7px;
+        margin-right: 4px;
+    }
+    .ind-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
         margin-top: 8px;
+        font-size: 0.72rem;
+    }
+    .ind-chip {
+        background: rgba(128, 128, 128, 0.10);
+        padding: 2px 7px;
+        border-radius: 6px;
+        font-weight: 600;
+        white-space: nowrap;
     }
     .fin-footer {
         display: flex;
         justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 6px;
         font-size: 0.76rem;
-        opacity: 0.85;
+        opacity: 0.90;
         margin-top: 8px;
         padding-top: 7px;
         border-top: 1px dashed rgba(128, 128, 128, 0.22);
     }
 
-    /* Compact KPI stat box (2x2 on mobile, 4-across on desktop) */
     .kpi-box {
         background: rgba(128, 128, 128, 0.055);
         border: 1px solid rgba(128, 128, 128, 0.20);
         border-radius: 12px;
         padding: 10px 12px;
     }
-    .kpi-label {
-        font-size: 0.73rem;
-        opacity: 0.72;
-        font-weight: 600;
-    }
-    .kpi-val {
-        font-size: 1.08rem;
-        font-weight: 800;
-        margin-top: 2px;
-    }
+    .kpi-label { font-size: 0.73rem; opacity: 0.72; font-weight: 600; }
+    .kpi-val { font-size: 1.06rem; font-weight: 800; margin-top: 2px; }
     .kpi-sub-up { font-size: 0.74rem; color: #16a34a; font-weight: 700; margin-top: 2px; }
     .kpi-sub-down { font-size: 0.74rem; color: #dc2626; font-weight: 700; margin-top: 2px; }
     .kpi-sub-muted { font-size: 0.73rem; opacity: 0.7; margin-top: 2px; }
 
-    /* Forecast Range Box */
     .range-hi { color: #16a34a; font-weight: 700; font-size: 0.84rem; margin-top: 4px; }
     .range-lo { color: #dc2626; font-weight: 700; font-size: 0.84rem; margin-top: 2px; }
 
-    /* Make tabs evenly spaced & crisp on mobile */
     button[data-baseweb="tab"] {
-        padding-left: 10px !important;
-        padding-right: 10px !important;
+        padding-left: 8px !important;
+        padding-right: 8px !important;
         font-weight: 600 !important;
-        font-size: 0.88rem !important;
+        font-size: 0.84rem !important;
     }
 
-    /* Mobile-only tweaks */
     @media (max-width: 640px) {
-        .app-title { font-size: 1.2rem; }
+        .block-container { padding-top: 3.8rem !important; }
+        .app-title { font-size: 1.18rem; }
         .card-grid { grid-template-columns: 1fr; gap: 8px; }
-        button[data-baseweb="tab"] { font-size: 0.82rem !important; padding: 6px 8px !important; }
+        button[data-baseweb="tab"] { font-size: 0.78rem !important; padding: 6px 6px !important; }
     }
     </style>
-    """,
-    unsafe_allow_html=True,
+    """
 )
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -300,6 +297,7 @@ def now_ist() -> datetime:
 
 
 def is_market_open() -> bool:
+    """True strictly during live NSE/BSE trading hours: Mon-Fri, 9:15 AM - 3:30 PM IST."""
     n = now_ist()
     return n.weekday() < 5 and (9, 15) <= (n.hour, n.minute) <= (15, 30)
 
@@ -316,7 +314,28 @@ def rs_signed(val: float) -> str:
 
 
 # ------------------------------------------------------------------------------
-# HTML CARD RENDERERS (SLEEK MOBILE + DESKTOP CARDS)
+# DUMMY PORTFOLIO STORAGE
+# ------------------------------------------------------------------------------
+def load_portfolio():
+    if os.path.exists(PORTFOLIO_FILE):
+        try:
+            with open(PORTFOLIO_FILE, "r") as f:
+                data = json.load(f)
+                if "total_deposited" not in data:
+                    data["total_deposited"] = 100000.0
+                return data
+        except Exception:
+            pass
+    return {"cash": 100000.0, "total_deposited": 100000.0, "holdings": [], "history": []}
+
+
+def save_portfolio(data):
+    with open(PORTFOLIO_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+# ------------------------------------------------------------------------------
+# HTML CARD RENDERERS
 # ------------------------------------------------------------------------------
 def render_stock_cards(df: pd.DataFrame, rank_start: int | None = None):
     cards_html = ['<div class="card-grid">']
@@ -350,7 +369,7 @@ def render_stock_cards(df: pd.DataFrame, rank_start: int | None = None):
         """
         cards_html.append(card)
     cards_html.append("</div>")
-    st.markdown("".join(cards_html), unsafe_allow_html=True)
+    render_html("".join(cards_html))
 
 
 def render_perf_cards(df: pd.DataFrame, highlight_col: str):
@@ -380,7 +399,7 @@ def render_perf_cards(df: pd.DataFrame, highlight_col: str):
         """
         cards_html.append(card)
     cards_html.append("</div>")
-    st.markdown("".join(cards_html), unsafe_allow_html=True)
+    render_html("".join(cards_html))
 
 
 def render_mf_cards(df: pd.DataFrame, ranked: bool = True):
@@ -412,11 +431,11 @@ def render_mf_cards(df: pd.DataFrame, ranked: bool = True):
         """
         cards_html.append(card)
     cards_html.append("</div>")
-    st.markdown("".join(cards_html), unsafe_allow_html=True)
+    render_html("".join(cards_html))
 
 
 # ------------------------------------------------------------------------------
-# NEWS, PORTFOLIO & DATA FUNCTIONS
+# LIVE NEWS & DIRECTORY HELPERS
 # ------------------------------------------------------------------------------
 def score_headline(title: str) -> str:
     text = title.lower()
@@ -448,21 +467,6 @@ def fetch_live_news(query: str, max_items: int = 6) -> list:
     except Exception:
         pass
     return items
-
-
-def load_portfolio():
-    if os.path.exists(PORTFOLIO_FILE):
-        try:
-            with open(PORTFOLIO_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"cash": 100000.0, "holdings": [], "history": []}
-
-
-def save_portfolio(data):
-    with open(PORTFOLIO_FILE, "w") as f:
-        json.dump(data, f, indent=2)
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -507,6 +511,166 @@ def search_yahoo_india(query: str) -> list:
     return []
 
 
+# ------------------------------------------------------------------------------
+# CALIBRATED QUICK WIN ENGINE (UNIQUE TARGETS + GRADED SCORES + PRO-RATED VOL)
+# ------------------------------------------------------------------------------
+@st.cache_data(ttl=15, show_spinner=False)
+def scan_instant_win_setups(exchange: str) -> pd.DataFrame:
+    """
+    Calibrated 15-min intraday scanner:
+    - Uses each stock's actual daily High-Low swing for unique % Up targets & % Down stops.
+    - Uses full-session pro-rated volume (fixes 3:15 PM closing-bell false spikes).
+    - Uses smooth graded scoring (eliminates ties at 92%).
+    """
+    suffix = ".NS" if exchange == "NSE" else ".BO"
+    tickers = [f"{sym}{suffix}" for sym in POPULAR_STOCKS.keys()]
+
+    try:
+        raw = yf.download(tickers, period="5d", interval="15m", group_by="ticker", progress=False, auto_adjust=True)
+    except Exception:
+        return pd.DataFrame()
+
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+
+    rows = []
+    eps = 1e-9
+
+    for sym, name in POPULAR_STOCKS.items():
+        full_ticker = f"{sym}{suffix}"
+        try:
+            sub = raw[full_ticker].dropna().copy() if len(tickers) > 1 else raw.dropna().copy()
+            if len(sub) < 25:
+                continue
+
+            if sub.index.tz is not None:
+                sub.index = sub.index.tz_convert("Asia/Kolkata")
+
+            close = sub["Close"]
+            price = float(close.iloc[-1])
+
+            latest_date = sub.index[-1].date()
+            today_mask = sub.index.date == latest_date
+            prev_bars = sub[~today_mask]
+            today_bars = sub[today_mask]
+
+            prev_close = float(prev_bars["Close"].iloc[-1]) if not prev_bars.empty else float(today_bars["Open"].iloc[0])
+            day_pct = ((price - prev_close) / (prev_close + eps)) * 100.0
+
+            # True Intraday VWAP for latest session
+            tp = (today_bars["High"] + today_bars["Low"] + today_bars["Close"]) / 3.0
+            t_vol_sum = float(today_bars["Volume"].sum())
+            vwap = float((tp * today_bars["Volume"]).sum() / t_vol_sum) if t_vol_sum > 0 else price
+            above_vwap = price >= vwap
+            vwap_pct = ((price - vwap) / (vwap + eps)) * 100.0
+
+            # EMA 9 vs EMA 21 spread (%)
+            ema9 = float(close.ewm(span=9, adjust=False).mean().iloc[-1])
+            ema21 = float(close.ewm(span=21, adjust=False).mean().iloc[-1])
+            ema_bull = ema9 > ema21
+            ema_spread_pct = ((ema9 - ema21) / (price + eps)) * 100.0
+
+            # 15m RSI (14)
+            delta = close.diff()
+            gain = float(delta.clip(lower=0).rolling(14).mean().iloc[-1])
+            loss = float((-delta.clip(upper=0)).rolling(14).mean().iloc[-1])
+            rsi = float(100.0 - (100.0 / (1.0 + gain / (loss + eps))))
+
+            # Pro-Rated Full-Day Volume Ratio (prevents fake 3:15 PM closing auction spike!)
+            vol_spike = 1.0
+            if not prev_bars.empty and t_vol_sum > 0:
+                prev_day_vols = prev_bars.groupby(prev_bars.index.date)["Volume"].sum()
+                avg_full_day_vol = float(prev_day_vols.mean())
+                if avg_full_day_vol > 0:
+                    # Full NSE session has ~25 15-min candles (9:15 to 15:30)
+                    session_progress = min(1.0, max(len(today_bars) / 25.0, 0.08))
+                    expected_vol = avg_full_day_vol * session_progress
+                    vol_spike = round(t_vol_sum / (expected_vol + eps), 2)
+
+            # Stock-Specific Daily High-Low Range (%) over last 5 sessions for realistic Target & Stop
+            daily_groups = sub.groupby(sub.index.date)
+            day_ranges = []
+            for _, grp in daily_groups:
+                if len(grp) >= 5:
+                    rng = (float(grp["High"].max()) - float(grp["Low"].min())) / (float(grp["Close"].iloc[-1]) + eps)
+                    day_ranges.append(rng)
+            avg_day_range = float(sum(day_ranges) / len(day_ranges)) if day_ranges else 0.018
+
+            # Unique realistic Quick Target (+0.9% to +4.5%) & Tight Stop (-0.55% to -2.5%)
+            up_pct = round(max(0.90, min(avg_day_range * 85.0, 4.50)), 2)
+            down_pct = -round(max(0.55, min(avg_day_range * 48.0, 2.50)), 2)
+            target_px = round(price * (1.0 + up_pct / 100.0), 2)
+            stop_px = round(price * (1.0 + down_pct / 100.0), 2)
+            rr = round(up_pct / max(abs(down_pct), 0.1), 1)
+
+            # Smooth Graded Setup Score (15% - 94%) — NO artificial ties!
+            score = 46.0
+            score += max(-16.0, min(16.0, vwap_pct * 15.0))            # VWAP distance strength
+            score += max(-14.0, min(14.0, ema_spread_pct * 18.0))      # EMA 9/21 trend momentum
+
+            if 45.0 <= rsi <= 68.0:
+                score += 11.0 - abs(rsi - 58.0) * 0.45                 # Peaks near RSI 58
+            elif rsi <= 33.0:
+                score += 7.0                                           # Oversold bounce zone
+            elif rsi > 74.0:
+                score -= min(12.0, (rsi - 74.0) * 1.1)                 # Overheated penalty
+
+            if day_pct > 0:
+                score += min(11.0, max(0.0, (vol_spike - 0.85) * 9.5))
+            elif day_pct < -0.5:
+                score -= min(11.0, max(0.0, (vol_spike - 0.85) * 9.5))
+
+            score += max(-7.0, min(7.0, day_pct * 2.2))                # Intraday price confirmation
+            score_int = int(round(max(15.0, min(94.0, score))))
+
+            # Action Flag & Category Bucket
+            if above_vwap and ema_bull and vol_spike >= 1.15 and score_int >= 72 and rsi <= 72:
+                flag = "⚡ QUICK BREAKOUT BUY"
+                bucket = "BULLISH"
+            elif score_int >= 66 and above_vwap:
+                flag = "🔥 HIGH-MOMENTUM BUY"
+                bucket = "BULLISH"
+            elif rsi <= 33:
+                flag = "🔄 OVERSOLD QUICK BOUNCE"
+                bucket = "BOUNCE"
+            elif score_int < 45:
+                flag = "🔴 AVOID / BEARISH PRESSURE"
+                bucket = "AVOID"
+            else:
+                flag = "⏳ WAIT / SIDEWAYS"
+                bucket = "NEUTRAL"
+
+            rows.append(
+                {
+                    "Symbol": full_ticker,
+                    "Company": name,
+                    "Price (₹)": round(price, 2),
+                    "Today (%)": round(day_pct, 2),
+                    "Setup Score": score_int,
+                    "Flag": flag,
+                    "Bucket": bucket,
+                    "VWAP": f"✅ Above ({vwap_pct:+.1f}%)" if above_vwap else f"🔻 Below ({vwap_pct:+.1f}%)",
+                    "EMA": "🟢 9>21 Up" if ema_bull else "🔴 9<21 Down",
+                    "RSI": round(rsi, 1),
+                    "Vol": f"{vol_spike}x",
+                    "Target (₹)": target_px,
+                    "Up (%)": up_pct,
+                    "Stop (₹)": stop_px,
+                    "Down (%)": down_pct,
+                    "R:R": f"1:{rr}",
+                }
+            )
+        except Exception:
+            continue
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(["Setup Score", "Today (%)"], ascending=False)
+
+
+# ------------------------------------------------------------------------------
+# MAIN STOCK, ETF & MUTUAL FUND ENGINES
+# ------------------------------------------------------------------------------
 def analyze_price_series(
     close: pd.Series,
     volume: pd.Series | None = None,
@@ -577,8 +741,8 @@ def analyze_price_series(
         low_52w = round(float(close.min()), 2)
 
     avg_daily_move = float(daily_returns.abs().tail(14).mean()) if not daily_returns.empty else 0.02
-    target_pct = max(0.05, min(avg_daily_move * 4.5, 0.12))
-    stop_pct = max(0.03, min(avg_daily_move * 2.5, 0.06))
+    target_pct = max(0.04, min(avg_daily_move * 4.5, 0.12))
+    stop_pct = max(0.025, min(avg_daily_move * 2.5, 0.06))
 
     sell_target = round(price * (1 + target_pct), 2)
     stop_loss = round(price * (1 - stop_pct), 2)
@@ -706,11 +870,11 @@ def _fetch_live_1m_prices(tickers: tuple) -> dict:
     return live_prices
 
 
-def scan_market_live(exchange: str, news_headlines: list) -> pd.DataFrame:
+def scan_market_live(exchange: str, news_headlines: list, market_open: bool) -> pd.DataFrame:
     suffix = ".NS" if exchange == "NSE" else ".BO"
     tickers = tuple(f"{sym}{suffix}" for sym in POPULAR_STOCKS.keys())
     hist_raw = _fetch_market_history(exchange)
-    live_map = _fetch_live_1m_prices(tickers)
+    live_map = _fetch_live_1m_prices(tickers) if market_open else {}
     pos_news_text = " ".join(n["title"].lower() for n in news_headlines if "Positive" in n["mood"])
 
     rows = []
@@ -765,11 +929,11 @@ def _fetch_single_history(full_ticker: str) -> pd.DataFrame:
     return df
 
 
-def fetch_single_stock_live(full_ticker: str):
+def fetch_single_stock_live(full_ticker: str, market_open: bool):
     df = _fetch_single_history(full_ticker)
     if df.empty:
         return pd.DataFrame(), None
-    live_map = _fetch_live_1m_prices((full_ticker,))
+    live_map = _fetch_live_1m_prices((full_ticker,)) if market_open else {}
     vol_series = df["Volume"] if "Volume" in df.columns else None
     info = analyze_price_series(df["Close"], volume=vol_series, live_override=live_map.get(full_ticker), full_df=df)
     return df, info
@@ -900,42 +1064,188 @@ def predict_when_to_sell(holding: dict, live_info: dict) -> tuple[str, str]:
 
 
 # ------------------------------------------------------------------------------
-# COMPACT MODERN HEADER (GREAT ON MOBILE & DESKTOP)
+# COMPACT MODERN HEADER + AUTOMATIC MARKET-CLOSE FREEZE
 # ------------------------------------------------------------------------------
+MARKET_OPEN = is_market_open()
+
 mkt_badge = (
-    '<span class="status-pill status-open">● Market OPEN</span>'
-    if is_market_open()
-    else '<span class="status-pill status-closed">● Market Closed</span>'
+    '<span class="status-pill status-open">● Market OPEN (Live)</span>'
+    if MARKET_OPEN
+    else '<span class="status-pill status-closed">🔒 Market Closed (Frozen)</span>'
 )
-st.markdown(
+render_html(
     f"""
     <div class="app-header">
         <div class="app-title">📈 India Stock, SIP & Gold</div>
         <div>{mkt_badge}</div>
     </div>
-    """,
-    unsafe_allow_html=True,
+    """
 )
+
+if not MARKET_OPEN:
+    render_html(
+        """
+        <div class="frozen-banner">
+            🔒 Indian Market is CLOSED (Trading Hours: Mon–Fri, 9:15 AM – 3:30 PM IST).
+            Prices are frozen at last close and all Buy/Sell trading options are disabled until market reopens.
+        </div>
+        """
+    )
 
 ctrl1, ctrl2, ctrl3 = st.columns([1.2, 1.4, 0.9])
 exchange = ctrl1.radio("Exchange", ["NSE", "BSE"], horizontal=True, label_visibility="collapsed")
-live_mode = ctrl2.toggle("🔴 Live (15s)", value=True)
-if ctrl3.button("🔄 Refresh", use_container_width=True):
-    _fetch_live_1m_prices.clear()
-    fetch_live_news.clear()
-    st.rerun()
+live_mode = ctrl2.toggle("🔴 Live (15s)", value=MARKET_OPEN, disabled=not MARKET_OPEN)
+if MARKET_OPEN:
+    if ctrl3.button("🔄 Refresh", use_container_width=True):
+        _fetch_live_1m_prices.clear()
+        scan_instant_win_setups.clear()
+        fetch_live_news.clear()
+        st.rerun()
+else:
+    ctrl3.button("❄️ Frozen", disabled=True, use_container_width=True)
 
-AUTO_INTERVAL = 15 if live_mode else None
+# Automatically freeze all auto-updates once market closes!
+AUTO_INTERVAL = 15 if (MARKET_OPEN and live_mode) else None
 
-# SHORT, MOBILE-FRIENDLY TABS (ALL 4 VISIBLE AT ONCE ON IPHONE & ANDROID!)
-tab1, tab2, tab3, tab4 = st.tabs(
+tab_quick, tab1, tab2, tab3, tab4 = st.tabs(
     [
-        "🏆 Stocks",
+        "⚡ Quick",
+        "🏆 Top 10",
         "🔍 Search",
-        "🪙 SIP & Gold",
+        "🪙 SIP",
         "🎮 Dummy",
     ]
 )
+
+# ==============================================================================
+# TAB 0: CALIBRATED QUICK WIN SETUPS (UNIQUE TARGETS + GRADED SCORES)
+# ==============================================================================
+with tab_quick:
+    @st.fragment(run_every=AUTO_INTERVAL)
+    def render_instant_wins():
+        render_html(f'<div class="sec-title">⚡ {exchange} Quick Win Setups (15-Min Indicators)</div>')
+        render_html(
+            '<div class="sec-sub">Graded short-term momentum setups using VWAP, EMA 9/21, RSI, Pro-Rated Volume & each stock\'s real daily volatility. '
+            'Always respect the Stop-Loss!</div>'
+        )
+        status_note = f"⏱️ Live Scan {now_ist().strftime('%I:%M:%S %p IST')}" if MARKET_OPEN else "❄️ Frozen at Last Market Close (3:30 PM IST)"
+        st.caption(status_note)
+
+        qdf = scan_instant_win_setups(exchange)
+        if qdf.empty:
+            st.warning("Intraday data temporarily unavailable.")
+            return
+
+        if MARKET_OPEN:
+            f_col1, f_col2 = st.columns([1.6, 1])
+            q_filter = f_col1.radio(
+                "Filter Setups",
+                ["🔥 Top Quick Buys", "🔄 Oversold Bounces", "🔴 Weak / Avoid", "All 30"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="quick_filter",
+            )
+            quick_buy_amt = f_col2.selectbox("1-Tap Dummy Size (₹)", [5000, 10000, 25000, 50000, 100000], index=1, key="quick_buy_amt")
+        else:
+            q_filter = st.radio(
+                "Filter Setups",
+                ["🔥 Top Quick Buys", "🔄 Oversold Bounces", "🔴 Weak / Avoid", "All 30"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="quick_filter",
+            )
+            quick_buy_amt = 10000
+
+        if q_filter == "🔥 Top Quick Buys":
+            show_df = qdf[qdf["Bucket"] == "BULLISH"].head(8)
+            if show_df.empty:
+                show_df = qdf.head(6)
+        elif q_filter == "🔄 Oversold Bounces":
+            show_df = qdf[qdf["Bucket"] == "BOUNCE"].head(8)
+            if show_df.empty:
+                st.info("No extreme oversold stocks right now (RSI ≤ 33). Showing lowest RSI stocks:")
+                show_df = qdf.sort_values("RSI", ascending=True).head(6)
+        elif q_filter == "🔴 Weak / Avoid":
+            show_df = qdf.sort_values("Setup Score", ascending=True).head(8)
+        else:
+            show_df = qdf
+
+        portfolio = load_portfolio()
+        if MARKET_OPEN:
+            st.caption(f"Available Dummy Cash: **₹{portfolio['cash']:,.2f}**")
+
+        cols = st.columns(2)
+        for idx, (_, r) in enumerate(show_df.iterrows()):
+            with cols[idx % 2]:
+                comp = html.escape(str(r["Company"]))
+                sym = html.escape(str(r["Symbol"]))
+                flag = html.escape(str(r["Flag"]))
+                vwap_s = html.escape(str(r["VWAP"]))
+                ema_s = html.escape(str(r["EMA"]))
+                render_html(
+                    f"""
+                    <div class="fin-card" style="margin-bottom:8px;">
+                        <div class="fin-row">
+                            <div>
+                                <div class="fin-name">#{idx + 1} {comp}</div>
+                                <div class="fin-meta">{sym} · Setup Score: <b>{r['Setup Score']}%</b> · R:R <b>{r['R:R']}</b></div>
+                            </div>
+                            <div style="text-align:right;">
+                                <div class="fin-price">₹{r['Price (₹)']:,.2f}</div>
+                                {pct_pill(r['Today (%)'], ' today')}
+                            </div>
+                        </div>
+                        <div><span class="pill-tag">{flag}</span></div>
+                        <div class="ind-strip">
+                            <span class="ind-chip">VWAP: {vwap_s}</span>
+                            <span class="ind-chip">EMA: {ema_s}</span>
+                            <span class="ind-chip">RSI: {r['RSI']}</span>
+                            <span class="ind-chip">Vol: {r['Vol']}</span>
+                        </div>
+                        <div class="fin-footer">
+                            <span style="color:#16a34a;">🎯 Target: <b>₹{r['Target (₹)']:,.2f} (+{r['Up (%)']}%)</b></span>
+                            <span style="color:#dc2626;">🛡️ Stop: <b>₹{r['Stop (₹)']:,.2f} ({r['Down (%)']}%)</b></span>
+                        </div>
+                    </div>
+                    """
+                )
+
+                # Trading button ONLY visible while Indian Market is OPEN
+                if MARKET_OPEN:
+                    if st.button(f"⚡ Quick Dummy Buy ₹{quick_buy_amt:,} — {sym.replace('.NS', '').replace('.BO', '')}", key=f"qbuy_{sym}_{idx}", use_container_width=True):
+                        qty = int(quick_buy_amt // r["Price (₹)"])
+                        cost = round(qty * r["Price (₹)"], 2)
+                        if qty <= 0:
+                            st.warning("Increase 1-Tap Dummy Size to buy at least 1 share.")
+                        elif cost > portfolio["cash"]:
+                            st.error("Not enough dummy cash! Add more virtual cash in the **🎮 Dummy** tab.")
+                        else:
+                            portfolio["cash"] = round(portfolio["cash"] - cost, 2)
+                            portfolio["holdings"].append(
+                                {
+                                    "id": int(now_ist().timestamp() * 1000) + idx,
+                                    "asset_type": "STOCK",
+                                    "ticker": sym,
+                                    "name": f"⚡ {r['Company']} (Quick)",
+                                    "buy_price": r["Price (₹)"],
+                                    "qty": qty,
+                                    "invested": cost,
+                                    "buy_date": now_ist().strftime("%d %b, %I:%M %p"),
+                                    "target_price": r["Target (₹)"],
+                                    "stop_loss": r["Stop (₹)"],
+                                }
+                            )
+                            save_portfolio(portfolio)
+                            st.success(f"Bought {qty} dummy shares of **{r['Company']}** for ₹{cost:,.2f}! Track live in **🎮 Dummy**.")
+
+        with st.expander("📊 View All 30 Stocks Quick-Win Indicator Table"):
+            st.dataframe(
+                qdf[["Company", "Symbol", "Flag", "Setup Score", "Price (₹)", "Today (%)", "VWAP", "EMA", "RSI", "Vol", "Target (₹)", "Up (%)", "Stop (₹)", "Down (%)", "R:R"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    render_instant_wins()
 
 # ==============================================================================
 # TAB 1: TOP 10 STOCKS, ON-THE-MOVE BUZZ & BOTTOM PERFORMERS
@@ -945,17 +1255,16 @@ with tab1:
 
     @st.fragment(run_every=AUTO_INTERVAL)
     def render_live_market_board():
-        market_df = scan_market_live(exchange, stock_news)
-        st.caption(f"⏱️ Updated {now_ist().strftime('%I:%M:%S %p IST')} · {exchange} Live Feed")
+        market_df = scan_market_live(exchange, stock_news, MARKET_OPEN)
+        st.caption(f"⏱️ Updated {now_ist().strftime('%I:%M:%S %p IST')} · {exchange} Live" if MARKET_OPEN else f"❄️ Frozen at Last {exchange} Close")
 
         if market_df.empty:
-            st.error("Could not load market data right now. Tap Refresh.")
+            st.error("Could not load market data right now.")
             return
 
-        # 1. ON THE MOVE CARDS
         on_move_df = market_df[market_df["IsOnMove"]].sort_values("Score", ascending=False).head(6)
-        st.markdown(f'<div class="sec-title">🔥 {exchange} On The Move</div>', unsafe_allow_html=True)
-        st.markdown('<div class="sec-sub">Active buying surge, positive news, or fresh breakout</div>', unsafe_allow_html=True)
+        render_html(f'<div class="sec-title">🔥 {exchange} On The Move</div>')
+        render_html('<div class="sec-sub">Active buying surge, positive news, or fresh breakout</div>')
 
         if not on_move_df.empty:
             render_stock_cards(on_move_df)
@@ -969,8 +1278,7 @@ with tab1:
             else:
                 st.caption("News feed temporarily unavailable.")
 
-        # 2. TOP 10 PROFITABLE STOCKS (CARD VIEW FOR MOBILE + OPTIONAL TABLE FOR DESKTOP)
-        st.markdown(f'<div class="sec-title">🏆 Top 10 Profitable {exchange} Stocks</div>', unsafe_allow_html=True)
+        render_html(f'<div class="sec-title">🏆 Top 10 Profitable {exchange} Stocks</div>')
         view_mode = st.radio("Layout", ["📱 Modern Cards", "📊 Full Table"], horizontal=True, label_visibility="collapsed", key="top10_view")
 
         top10 = market_df.sort_values(["Score", "Monthly (%)"], ascending=False).head(10)
@@ -987,8 +1295,7 @@ with tab1:
                 hide_index=True,
             )
 
-        # 3. BOTTOM PERFORMERS & TOP GAINERS (DAILY / WEEKLY / MONTHLY)
-        st.markdown(f'<div class="sec-title">📉 Bottom Performers & Gainers</div>', unsafe_allow_html=True)
+        render_html('<div class="sec-title">📉 Bottom Performers & Gainers</div>')
         period_choice = st.radio("Timeframe", ["Daily", "Weekly", "Monthly"], horizontal=True, label_visibility="collapsed", key="perf_tf")
         col_map = {"Daily": "Daily (%)", "Weekly": "Weekly (%)", "Monthly": "Monthly (%)"}
         sort_col = col_map[period_choice]
@@ -1002,10 +1309,10 @@ with tab1:
     render_live_market_board()
 
 # ==============================================================================
-# TAB 2: LIVE SEARCH + EXPECTED HIGH/LOW FORECAST + NEWS + DUMMY BUY
+# TAB 2: LIVE SEARCH + EXPECTED HIGH/LOW FORECAST + NEWS (BUY HIDDEN WHEN CLOSED)
 # ==============================================================================
 with tab2:
-    st.markdown('<div class="sec-title">🔍 Search Any Indian Stock</div>', unsafe_allow_html=True)
+    render_html('<div class="sec-title">🔍 Search Any Indian Stock</div>')
 
     all_stocks = load_all_indian_stocks()
     option_map = {f"{name} ({sym})": sym for sym, name in sorted(all_stocks.items(), key=lambda x: x[1])}
@@ -1043,22 +1350,21 @@ with tab2:
     else:
         @st.fragment(run_every=AUTO_INTERVAL)
         def render_searched_stock_live(ticker_to_show, label_to_show):
-            sdf, sinfo = fetch_single_stock_live(ticker_to_show)
+            sdf, sinfo = fetch_single_stock_live(ticker_to_show, MARKET_OPEN)
             if sinfo is None and ticker_to_show.endswith(".BO"):
                 alt_ticker = ticker_to_show.replace(".BO", ".NS")
-                sdf, sinfo = fetch_single_stock_live(alt_ticker)
+                sdf, sinfo = fetch_single_stock_live(alt_ticker, MARKET_OPEN)
                 if sinfo is not None:
                     ticker_to_show = alt_ticker
 
             if sinfo is None:
-                st.error(f"Could not fetch live price for **{ticker_to_show}**.")
+                st.error(f"Could not fetch price for **{ticker_to_show}**.")
                 return
 
-            st.caption(f"⏱️ Live Quote: {now_ist().strftime('%I:%M:%S %p IST')}")
+            st.caption(f"⏱️ Live Quote: {now_ist().strftime('%I:%M:%S %p IST')}" if MARKET_OPEN else "❄️ Frozen at Last Market Close")
 
-            # Hero Fintech Summary Card
             safe_label = html.escape(label_to_show)
-            st.markdown(
+            render_html(
                 f"""
                 <div class="fin-card" style="margin-bottom:10px;">
                     <div class="fin-row">
@@ -1083,13 +1389,11 @@ with tab2:
                         1W: <b>{sinfo['weekly_pct']:+.2f}%</b> · 1M: <b>{sinfo['monthly_pct']:+.2f}%</b> · {html.escape(sinfo['reason'])}
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
-            # 2x2 Responsive Price Range Forecast Grid (compact on mobile, 4-across on desktop!)
-            st.markdown('<div class="sec-title">📊 Expected High / Low Forecast</div>', unsafe_allow_html=True)
-            st.markdown(
+            render_html('<div class="sec-title">📊 Expected High / Low Forecast</div>')
+            render_html(
                 f"""
                 <div class="grid-2col grid-2col-desktop4">
                     <div class="kpi-box">
@@ -1113,11 +1417,9 @@ with tab2:
                         <div class="range-lo">⬇️ ₹{sinfo['low_52w']:,.2f}</div>
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
-            # Clean Mobile-Friendly Chart (no cluttered toolbar)
             sdf_plot = sdf.tail(90).copy()
             sdf_plot["20-Day Avg"] = sdf["Close"].rolling(20).mean().tail(90)
 
@@ -1135,7 +1437,6 @@ with tab2:
             )
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-            # Live Stock News
             clean_name = label_to_show.split("(")[0].strip()
             comp_news = fetch_live_news(f"{clean_name} stock share price India", max_items=4)
             if comp_news:
@@ -1143,52 +1444,53 @@ with tab2:
                     for n in comp_news:
                         st.markdown(f"{n['mood']} · [{n['title']}]({n['link']}) `{n['published']}`")
 
-            # Dummy Buy Box
-            st.markdown('<div class="sec-title">🎮 Practice Dummy Buy</div>', unsafe_allow_html=True)
-            portfolio = load_portfolio()
-            st.caption(f"Dummy Cash Available: **₹{portfolio['cash']:,.2f}**")
+            # Dummy Buy Box ONLY shown when Indian Market is OPEN
+            if MARKET_OPEN:
+                render_html('<div class="sec-title">🎮 Practice Dummy Buy</div>')
+                portfolio = load_portfolio()
+                st.caption(f"Dummy Cash Available: **₹{portfolio['cash']:,.2f}**")
 
-            d1, d2 = st.columns([1.6, 1])
-            dummy_amt = d1.number_input(
-                "Amount (₹)",
-                min_value=500.0,
-                max_value=max(500.0, float(portfolio["cash"])),
-                value=min(10000.0, max(500.0, float(portfolio["cash"]))),
-                step=500.0,
-                key="stock_dummy_amt",
-            )
-            qty = int(dummy_amt // sinfo["price"])
-            actual_cost = round(qty * sinfo["price"], 2)
-            st.caption(f"Buys **{qty} shares** @ ₹{sinfo['price']:,.2f} (Total: ₹{actual_cost:,.2f})")
+                d1, d2 = st.columns([1.6, 1])
+                dummy_amt = d1.number_input(
+                    "Amount (₹)",
+                    min_value=500.0,
+                    max_value=max(500.0, float(portfolio["cash"])),
+                    value=min(10000.0, max(500.0, float(portfolio["cash"]))),
+                    step=500.0,
+                    key="stock_dummy_amt",
+                )
+                qty = int(dummy_amt // sinfo["price"])
+                actual_cost = round(qty * sinfo["price"], 2)
+                st.caption(f"Buys **{qty} shares** @ ₹{sinfo['price']:,.2f} (Total: ₹{actual_cost:,.2f})")
 
-            if d2.button("💸 Buy Dummy", type="primary", use_container_width=True, key="buy_stock_btn"):
-                if qty <= 0:
-                    st.warning("Increase amount to buy at least 1 share.")
-                elif actual_cost > portfolio["cash"]:
-                    st.error("Not enough dummy cash! Check Dummy tab.")
-                else:
-                    portfolio["cash"] = round(portfolio["cash"] - actual_cost, 2)
-                    portfolio["holdings"].append(
-                        {
-                            "id": int(now_ist().timestamp()),
-                            "asset_type": "STOCK",
-                            "ticker": ticker_to_show,
-                            "name": label_to_show,
-                            "buy_price": sinfo["price"],
-                            "qty": qty,
-                            "invested": actual_cost,
-                            "buy_date": now_ist().strftime("%d %b %Y, %I:%M %p"),
-                            "target_price": sinfo["sell_target"],
-                            "stop_loss": sinfo["stop_loss"],
-                        }
-                    )
-                    save_portfolio(portfolio)
-                    st.success(f"Bought {qty} dummy shares of **{label_to_show}**! Check the **🎮 Dummy** tab.")
+                if d2.button("💸 Buy Dummy", type="primary", use_container_width=True, key="buy_stock_btn"):
+                    if qty <= 0:
+                        st.warning("Increase amount to buy at least 1 share.")
+                    elif actual_cost > portfolio["cash"]:
+                        st.error("Not enough dummy cash! Add more in **🎮 Dummy** tab.")
+                    else:
+                        portfolio["cash"] = round(portfolio["cash"] - actual_cost, 2)
+                        portfolio["holdings"].append(
+                            {
+                                "id": int(now_ist().timestamp() * 1000),
+                                "asset_type": "STOCK",
+                                "ticker": ticker_to_show,
+                                "name": label_to_show,
+                                "buy_price": sinfo["price"],
+                                "qty": qty,
+                                "invested": actual_cost,
+                                "buy_date": now_ist().strftime("%d %b, %I:%M %p"),
+                                "target_price": sinfo["sell_target"],
+                                "stop_loss": sinfo["stop_loss"],
+                            }
+                        )
+                        save_portfolio(portfolio)
+                        st.success(f"Bought {qty} dummy shares of **{label_to_show}**! Check the **🎮 Dummy** tab.")
 
         render_searched_stock_live(full_ticker, display_name)
 
 # ==============================================================================
-# TAB 3: TOP 10 PROFITABLE SIPs, MUTUAL FUNDS & GOLD
+# TAB 3: TOP 10 PROFITABLE SIPs, MUTUAL FUNDS & GOLD (TRADING HIDDEN WHEN CLOSED)
 # ==============================================================================
 with tab3:
     mf_news = fetch_live_news("India mutual fund SIP inflow top performing funds gold", max_items=6)
@@ -1196,8 +1498,7 @@ with tab3:
     with st.spinner("Loading Top 10 Profitable SIPs & Mutual Funds..."):
         mf_board = scan_top_mutual_funds()
 
-    # 1. HOT SIPs & MFs
-    st.markdown('<div class="sec-title">🔥 SIPs & MFs On The Move</div>', unsafe_allow_html=True)
+    render_html('<div class="sec-title">🔥 SIPs & MFs On The Move</div>')
     if not mf_board.empty:
         hot_mfs = mf_board[mf_board["IsHot"]].head(4)
         if hot_mfs.empty:
@@ -1211,9 +1512,8 @@ with tab3:
         else:
             st.caption("News feed temporarily unavailable.")
 
-    # 2. TOP 10 PROFITABLE SIPs & MFs
-    st.markdown('<div class="sec-title">🏆 Top 10 Profitable SIPs & MFs</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sec-sub">Ranked by real 3-year profit on a ₹5,000/month SIP (Official AMFI NAVs)</div>', unsafe_allow_html=True)
+    render_html('<div class="sec-title">🏆 Top 10 Profitable SIPs & MFs</div>')
+    render_html('<div class="sec-sub">Ranked by real 3-year profit on a ₹5,000/month SIP (Official AMFI NAVs)</div>')
     mf_view = st.radio("MF Layout", ["📱 Modern Cards", "📊 Full Table"], horizontal=True, label_visibility="collapsed", key="mf_view")
 
     if not mf_board.empty:
@@ -1228,21 +1528,20 @@ with tab3:
                 hide_index=True,
             )
 
-    # 3. LIVE GOLD, SILVER & INDEX ETFs
     @st.fragment(run_every=AUTO_INTERVAL)
     def render_live_gold_etfs():
-        st.markdown('<div class="sec-title">🪙 Gold, Silver & Nifty ETFs (Live)</div>', unsafe_allow_html=True)
-        st.caption(f"⏱️ Live ETF Prices: {now_ist().strftime('%I:%M:%S %p IST')}")
+        render_html('<div class="sec-title">🪙 Gold, Silver & Nifty ETFs</div>')
+        st.caption(f"⏱️ Live ETF Prices: {now_ist().strftime('%I:%M:%S %p IST')}" if MARKET_OPEN else "❄️ Frozen at Last Market Close")
 
         portfolio = load_portfolio()
         etf_cols = st.columns(2)
         for idx, (etf_ticker, (etf_title, etf_desc)) in enumerate(GOLD_AND_ETFS.items()):
-            _, etf_info = fetch_single_stock_live(etf_ticker)
+            _, etf_info = fetch_single_stock_live(etf_ticker, MARKET_OPEN)
             with etf_cols[idx % 2]:
                 if etf_info:
-                    st.markdown(
+                    render_html(
                         f"""
-                        <div class="fin-card" style="margin-bottom:6px;">
+                        <div class="fin-card" style="margin-bottom:8px;">
                             <div class="fin-row">
                                 <div>
                                     <div class="fin-name">{html.escape(etf_title)}</div>
@@ -1259,38 +1558,37 @@ with tab3:
                                 <span>🛡️ ₹{etf_info['stop_loss']}</span>
                             </div>
                         </div>
-                        """,
-                        unsafe_allow_html=True,
+                        """
                     )
-                    if st.button(f"Buy ₹5,000 Dummy ({etf_ticker.replace('.NS', '')})", key=f"buy_etf_{etf_ticker}", use_container_width=True):
-                        qty = int(5000 // etf_info["price"])
-                        cost = round(qty * etf_info["price"], 2)
-                        if qty > 0 and cost <= portfolio["cash"]:
-                            portfolio["cash"] = round(portfolio["cash"] - cost, 2)
-                            portfolio["holdings"].append(
-                                {
-                                    "id": int(now_ist().timestamp()) + idx,
-                                    "asset_type": "ETF",
-                                    "ticker": etf_ticker,
-                                    "name": etf_title,
-                                    "buy_price": etf_info["price"],
-                                    "qty": qty,
-                                    "invested": cost,
-                                    "buy_date": now_ist().strftime("%d %b %Y, %I:%M %p"),
-                                    "target_price": etf_info["sell_target"],
-                                    "stop_loss": etf_info["stop_loss"],
-                                }
-                            )
-                            save_portfolio(portfolio)
-                            st.success(f"Invested ₹{cost:,.2f} dummy into {etf_title}!")
-                            st.rerun()
-                        else:
-                            st.warning("Not enough dummy cash!")
+                    if MARKET_OPEN:
+                        if st.button(f"Buy ₹5,000 Dummy ({etf_ticker.replace('.NS', '')})", key=f"buy_etf_{etf_ticker}", use_container_width=True):
+                            qty = int(5000 // etf_info["price"])
+                            cost = round(qty * etf_info["price"], 2)
+                            if qty > 0 and cost <= portfolio["cash"]:
+                                portfolio["cash"] = round(portfolio["cash"] - cost, 2)
+                                portfolio["holdings"].append(
+                                    {
+                                        "id": int(now_ist().timestamp() * 1000) + idx,
+                                        "asset_type": "ETF",
+                                        "ticker": etf_ticker,
+                                        "name": etf_title,
+                                        "buy_price": etf_info["price"],
+                                        "qty": qty,
+                                        "invested": cost,
+                                        "buy_date": now_ist().strftime("%d %b, %I:%M %p"),
+                                        "target_price": etf_info["sell_target"],
+                                        "stop_loss": etf_info["stop_loss"],
+                                    }
+                                )
+                                save_portfolio(portfolio)
+                                st.success(f"Invested ₹{cost:,.2f} dummy into {etf_title}!")
+                                st.rerun()
+                            else:
+                                st.warning("Not enough dummy cash! Add more in **🎮 Dummy**.")
 
     render_live_gold_etfs()
 
-    # 4. SEARCH ANY MUTUAL FUND + SIP CALCULATOR
-    st.markdown('<div class="sec-title">🔍 Search Any Mutual Fund & SIP Calculator</div>', unsafe_allow_html=True)
+    render_html('<div class="sec-title">🔍 Search Any Mutual Fund & SIP Calculator</div>')
     mf_choice_mode = st.selectbox("Pick a Popular Fund:", list(POPULAR_MFS.keys()))
     mf_search_text = st.text_input("Or search ANY Indian Mutual Fund:", placeholder="e.g. Axis Bluechip, Quant Mid Cap...")
 
@@ -1327,7 +1625,7 @@ with tab3:
         profit_sip = val_sip - invested_sip
         sip_pct = (profit_sip / max(invested_sip, 1)) * 100
 
-        st.markdown(
+        render_html(
             f"""
             <div class="fin-card" style="margin:8px 0;">
                 <div class="fin-name">{html.escape(selected_mf_name)}</div>
@@ -1338,51 +1636,52 @@ with tab3:
                 </div>
                 <div style="margin-top:6px;">Profit: <b>{rs_signed(profit_sip)}</b> {pct_pill(sip_pct)}</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
-        portfolio = load_portfolio()
-        mb1, mb2 = st.columns([1.5, 1])
-        mf_dummy_amt = mb1.number_input(
-            "Dummy MF Amount (₹)",
-            min_value=500.0,
-            max_value=max(500.0, float(portfolio["cash"])),
-            value=min(5000.0, max(500.0, float(portfolio["cash"]))),
-            step=500.0,
-            key="mf_dummy_amt",
-        )
-        if mb2.button("💸 Buy Dummy MF", type="primary", use_container_width=True):
-            if mf_dummy_amt <= portfolio["cash"]:
-                units = round(mf_dummy_amt / latest_nav, 4)
-                portfolio["cash"] = round(portfolio["cash"] - mf_dummy_amt, 2)
-                portfolio["holdings"].append(
-                    {
-                        "id": int(now_ist().timestamp()),
-                        "asset_type": "MF",
-                        "ticker": selected_scheme_code,
-                        "name": f"MF: {selected_mf_name[:42]}",
-                        "buy_price": round(latest_nav, 2),
-                        "qty": units,
-                        "invested": round(mf_dummy_amt, 2),
-                        "buy_date": now_ist().strftime("%d %b %Y, %I:%M %p"),
-                        "target_price": round(latest_nav * 1.20, 2),
-                        "stop_loss": round(latest_nav * 0.85, 2),
-                    }
-                )
-                save_portfolio(portfolio)
-                st.success(f"Invested ₹{mf_dummy_amt:,.2f} dummy into this Mutual Fund! Check **🎮 Dummy** tab.")
-            else:
-                st.error("Not enough dummy cash!")
+        # MF Dummy Buy ONLY shown while Market is OPEN
+        if MARKET_OPEN:
+            portfolio = load_portfolio()
+            mb1, mb2 = st.columns([1.5, 1])
+            mf_dummy_amt = mb1.number_input(
+                "Dummy MF Amount (₹)",
+                min_value=500.0,
+                max_value=max(500.0, float(portfolio["cash"])),
+                value=min(5000.0, max(500.0, float(portfolio["cash"]))),
+                step=500.0,
+                key="mf_dummy_amt",
+            )
+            if mb2.button("💸 Buy Dummy MF", type="primary", use_container_width=True):
+                if mf_dummy_amt <= portfolio["cash"]:
+                    units = round(mf_dummy_amt / latest_nav, 4)
+                    portfolio["cash"] = round(portfolio["cash"] - mf_dummy_amt, 2)
+                    portfolio["holdings"].append(
+                        {
+                            "id": int(now_ist().timestamp() * 1000),
+                            "asset_type": "MF",
+                            "ticker": selected_scheme_code,
+                            "name": f"MF: {selected_mf_name[:42]}",
+                            "buy_price": round(latest_nav, 2),
+                            "qty": units,
+                            "invested": round(mf_dummy_amt, 2),
+                            "buy_date": now_ist().strftime("%d %b, %I:%M %p"),
+                            "target_price": round(latest_nav * 1.20, 2),
+                            "stop_loss": round(latest_nav * 0.85, 2),
+                        }
+                    )
+                    save_portfolio(portfolio)
+                    st.success(f"Invested ₹{mf_dummy_amt:,.2f} dummy into this Mutual Fund! Check **🎮 Dummy** tab.")
+                else:
+                    st.error("Not enough dummy cash! Add more in **🎮 Dummy**.")
 
 # ==============================================================================
-# TAB 4: MOBILE-FRIENDLY DUMMY PORTFOLIO & LIVE SELL ALERTS
+# TAB 4: DUMMY PORTFOLIO + INCREASE DUMMY VALUE (SELL HIDDEN WHEN CLOSED)
 # ==============================================================================
 with tab4:
     @st.fragment(run_every=AUTO_INTERVAL)
     def render_live_dummy_portfolio():
-        st.markdown('<div class="sec-title">🎮 My Dummy Portfolio</div>', unsafe_allow_html=True)
-        st.caption(f"⏱️ Live P&L Updated: {now_ist().strftime('%I:%M:%S %p IST')}")
+        render_html('<div class="sec-title">🎮 My Dummy Portfolio</div>')
+        st.caption(f"⏱️ Live P&L Updated: {now_ist().strftime('%I:%M:%S %p IST')}" if MARKET_OPEN else "❄️ Frozen at Last Market Close (Trading Paused)")
         portfolio = load_portfolio()
 
         holdings = portfolio["holdings"]
@@ -1398,7 +1697,7 @@ with tab4:
                 except Exception:
                     live_info = None
             else:
-                _, live_info = fetch_single_stock_live(h["ticker"])
+                _, live_info = fetch_single_stock_live(h["ticker"], MARKET_OPEN)
 
             live_price = live_info["price"] if live_info else h["buy_price"]
             cur_val = round(live_price * h["qty"], 2)
@@ -1408,14 +1707,15 @@ with tab4:
             if live_info:
                 sell_signal, sell_reason = predict_when_to_sell(h, live_info)
             else:
-                sell_signal, sell_reason = "⏳ Updating...", "Tap Refresh above."
+                sell_signal, sell_reason = "⏳ Updating...", "Waiting for market data."
 
             total_invested += h["invested"]
             total_current += cur_val
             enriched_holdings.append((h, live_price, cur_val, pnl, pnl_pct, sell_signal, sell_reason))
 
+        total_deposited = float(portfolio.get("total_deposited", 100000.0))
         total_net_worth = portfolio["cash"] + total_current
-        overall_pnl = total_net_worth - 100000.0
+        overall_pnl = total_net_worth - total_deposited
         holdings_pnl = total_current - total_invested
 
         nw_cls = "kpi-sub-up" if overall_pnl >= 0 else "kpi-sub-down"
@@ -1423,19 +1723,18 @@ with tab4:
         hp_cls = "kpi-sub-up" if holdings_pnl >= 0 else "kpi-sub-down"
         hp_arrow = "▲" if holdings_pnl >= 0 else "▼"
 
-        # 2x2 Summary Grid on Mobile (4-across on Desktop!)
-        st.markdown(
+        render_html(
             f"""
             <div class="grid-2col grid-2col-desktop4">
                 <div class="kpi-box">
                     <div class="kpi-label">Virtual Net Worth</div>
                     <div class="kpi-val">₹{total_net_worth:,.2f}</div>
-                    <div class="{nw_cls}">{nw_arrow} {rs_signed(overall_pnl)} overall</div>
+                    <div class="{nw_cls}">{nw_arrow} {rs_signed(overall_pnl)} P&amp;L</div>
                 </div>
                 <div class="kpi-box">
                     <div class="kpi-label">Dummy Cash Left</div>
                     <div class="kpi-val">₹{portfolio['cash']:,.2f}</div>
-                    <div class="kpi-sub-muted">Ready to invest</div>
+                    <div class="kpi-sub-muted">Capital Added: ₹{total_deposited:,.0f}</div>
                 </div>
                 <div class="kpi-box">
                     <div class="kpi-label">Currently Invested</div>
@@ -1448,14 +1747,45 @@ with tab4:
                     <div class="{hp_cls}">{hp_arrow} {rs_signed(holdings_pnl)}</div>
                 </div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
+        # Wallet funding stays available so you can prepare your Dummy balance ahead of market open
+        with st.expander("💰 Increase Dummy Account Value (Add Virtual Cash)", expanded=False):
+            st.caption("Adding virtual cash increases your Dummy Cash & Capital Added without skewing your real Profit/Loss.")
+            qc1, qc2, qc3 = st.columns(3)
+            if qc1.button("+ ₹50,000", use_container_width=True):
+                portfolio["cash"] = round(portfolio["cash"] + 50000.0, 2)
+                portfolio["total_deposited"] = round(total_deposited + 50000.0, 2)
+                save_portfolio(portfolio)
+                st.rerun()
+            if qc2.button("+ ₹1,00,000", use_container_width=True):
+                portfolio["cash"] = round(portfolio["cash"] + 100000.0, 2)
+                portfolio["total_deposited"] = round(total_deposited + 100000.0, 2)
+                save_portfolio(portfolio)
+                st.rerun()
+            if qc3.button("+ ₹5,00,000", use_container_width=True):
+                portfolio["cash"] = round(portfolio["cash"] + 500000.0, 2)
+                portfolio["total_deposited"] = round(total_deposited + 500000.0, 2)
+                save_portfolio(portfolio)
+                st.rerun()
+
+            ac1, ac2 = st.columns([1.6, 1])
+            custom_add = ac1.number_input("Or enter custom amount to add (₹):", min_value=1000.0, max_value=10000000.0, value=25000.0, step=5000.0, key="custom_cash_add")
+            if ac2.button("➕ Add Cash", type="primary", use_container_width=True):
+                portfolio["cash"] = round(portfolio["cash"] + float(custom_add), 2)
+                portfolio["total_deposited"] = round(total_deposited + float(custom_add), 2)
+                save_portfolio(portfolio)
+                st.success(f"Added ₹{custom_add:,.2f} dummy cash!")
+                st.rerun()
+
         if not enriched_holdings:
-            st.info("No active dummy investments yet. Buy a stock in **🔍 Search** or Gold/MF in **🪙 SIP & Gold**!")
+            if MARKET_OPEN:
+                st.info("No active dummy investments yet. Try a 1-tap trade in **⚡ Quick**, search in **🔍 Search**, or buy Gold/MF in **🪙 SIP**!")
+            else:
+                st.info("No active dummy investments. Trading opens at **9:15 AM IST (Mon–Fri)**.")
         else:
-            st.markdown('<div class="sec-title">Active Holdings & Sell Alerts</div>', unsafe_allow_html=True)
+            render_html('<div class="sec-title">Active Holdings & Sell Alerts</div>')
             for h, live_price, cur_val, pnl, pnl_pct, sell_signal, sell_reason in enriched_holdings:
                 label = html.escape(h.get("name", h["ticker"]))
                 unit_word = "units" if h.get("asset_type") == "MF" else "shares"
@@ -1467,13 +1797,13 @@ with tab4:
                     else f"<span>Live NAV: <b>₹{live_price:,.2f}</b></span><span>Long-term SIP</span>"
                 )
 
-                st.markdown(
+                render_html(
                     f"""
-                    <div class="fin-card" style="margin-bottom:6px;">
+                    <div class="fin-card" style="margin-bottom:8px;">
                         <div class="fin-row">
                             <div>
                                 <div class="fin-name">{label}</div>
-                                <div class="fin-meta">{h['qty']} {unit_word} @ ₹{h['buy_price']:,.2f} · Live ₹{live_price:,.2f}</div>
+                                <div class="fin-meta">{h['qty']} {unit_word} @ ₹{h['buy_price']:,.2f} · Last ₹{live_price:,.2f}</div>
                             </div>
                             <div style="text-align:right;">
                                 <div class="fin-price">₹{cur_val:,.2f}</div>
@@ -1484,34 +1814,35 @@ with tab4:
                         <div class="fin-meta" style="margin-top:5px;">{html.escape(sell_reason)}</div>
                         <div class="fin-footer">{target_line}</div>
                     </div>
-                    """,
-                    unsafe_allow_html=True,
+                    """
                 )
 
-                if st.button(f"Sell Now (Dummy) — {h.get('name', h['ticker'])[:24]}", key=f"sell_{h['id']}", type="primary", use_container_width=True):
-                    portfolio["cash"] = round(portfolio["cash"] + cur_val, 2)
-                    portfolio["history"].append(
-                        {
-                            "Asset": h.get("name", h["ticker"]),
-                            "Qty": h["qty"],
-                            "Buy (₹)": h["buy_price"],
-                            "Sell (₹)": live_price,
-                            "P&L (₹)": pnl,
-                            "Return (%)": pnl_pct,
-                            "Sold On": now_ist().strftime("%d %b, %I:%M %p"),
-                        }
-                    )
-                    portfolio["holdings"] = [item for item in portfolio["holdings"] if item["id"] != h["id"]]
-                    save_portfolio(portfolio)
-                    st.rerun()
+                # Sell button ONLY visible while Indian Market is OPEN
+                if MARKET_OPEN:
+                    if st.button(f"Sell Now (Dummy) — {h.get('name', h['ticker'])[:24]}", key=f"sell_{h['id']}", type="primary", use_container_width=True):
+                        portfolio["cash"] = round(portfolio["cash"] + cur_val, 2)
+                        portfolio["history"].append(
+                            {
+                                "Asset": h.get("name", h["ticker"]),
+                                "Qty": h["qty"],
+                                "Buy (₹)": h["buy_price"],
+                                "Sell (₹)": live_price,
+                                "P&L (₹)": pnl,
+                                "Return (%)": pnl_pct,
+                                "Sold On": now_ist().strftime("%d %b, %I:%M %p"),
+                            }
+                        )
+                        portfolio["holdings"] = [item for item in portfolio["holdings"] if item["id"] != h["id"]]
+                        save_portfolio(portfolio)
+                        st.rerun()
 
         if portfolio["history"]:
-            st.markdown('<div class="sec-title">Past Completed Trades</div>', unsafe_allow_html=True)
+            render_html('<div class="sec-title">Past Completed Trades</div>')
             st.dataframe(pd.DataFrame(portfolio["history"]).iloc[::-1], use_container_width=True, hide_index=True)
 
         st.divider()
-        if st.button("🔁 Reset Dummy Wallet to ₹1,00,000", use_container_width=True):
-            save_portfolio({"cash": 100000.0, "holdings": [], "history": []})
+        if st.button("🔁 Reset Dummy Wallet Back to ₹1,00,000", use_container_width=True):
+            save_portfolio({"cash": 100000.0, "total_deposited": 100000.0, "holdings": [], "history": []})
             st.rerun()
 
     render_live_dummy_portfolio()
