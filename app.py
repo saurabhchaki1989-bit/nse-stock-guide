@@ -1,8 +1,11 @@
+import hashlib
 import html
 import io
 import json
 import math
 import os
+import re
+import secrets
 import urllib.parse
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +16,13 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yfinance as yf
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSHEETS_LIBS_OK = True
+except ImportError:
+    GSHEETS_LIBS_OK = False
 
 st.set_page_config(
     page_title="NSE/BSE Live Stocks, Quick Wins, SIPs & Gold",
@@ -50,24 +60,22 @@ render_html(
         gap: 8px;
         margin-bottom: 0.5rem;
     }
-    .app-title {
-        font-size: 1.42rem;
-        font-weight: 800;
-        margin: 0;
-        letter-spacing: -0.3px;
-    }
+    .app-title { font-size: 1.38rem; font-weight: 800; margin: 0; letter-spacing: -0.3px; }
+    .header-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
     .status-pill {
         display: inline-flex;
         align-items: center;
-        gap: 6px;
+        gap: 5px;
         padding: 4px 10px;
         border-radius: 999px;
-        font-size: 0.78rem;
+        font-size: 0.76rem;
         font-weight: 600;
         white-space: nowrap;
     }
     .status-open { background: rgba(22, 163, 74, 0.14); color: #16a34a; border: 1px solid rgba(22, 163, 74, 0.3); }
     .status-closed { background: rgba(220, 38, 38, 0.10); color: #dc2626; border: 1px solid rgba(220, 38, 38, 0.28); }
+    .status-user { background: rgba(59, 130, 246, 0.12); color: #2563eb; border: 1px solid rgba(59, 130, 246, 0.28); }
 
     .frozen-banner {
         background: rgba(100, 116, 139, 0.11);
@@ -77,6 +85,16 @@ render_html(
         font-size: 0.82rem;
         font-weight: 600;
         margin-bottom: 0.65rem;
+    }
+
+    .auth-box {
+        max-width: 480px;
+        margin: 0.8rem auto;
+        background: rgba(128, 128, 128, 0.055);
+        border: 1px solid rgba(128, 128, 128, 0.22);
+        border-radius: 16px;
+        padding: 18px 20px;
+        text-align: center;
     }
 
     .sec-title { font-size: 1.08rem; font-weight: 700; margin: 0.85rem 0 0.25rem 0; }
@@ -104,12 +122,7 @@ render_html(
         border-radius: 14px;
         padding: 12px 14px;
     }
-    .fin-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        gap: 8px;
-    }
+    .fin-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
     .fin-name { font-weight: 700; font-size: 0.96rem; line-height: 1.25; }
     .fin-meta { font-size: 0.75rem; opacity: 0.74; margin-top: 2px; }
     .fin-price { font-weight: 800; font-size: 1.08rem; text-align: right; white-space: nowrap; }
@@ -147,13 +160,7 @@ render_html(
         margin-top: 7px;
         margin-right: 4px;
     }
-    .ind-strip {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 6px;
-        margin-top: 8px;
-        font-size: 0.72rem;
-    }
+    .ind-strip { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; font-size: 0.72rem; }
     .ind-chip {
         background: rgba(128, 128, 128, 0.10);
         padding: 2px 7px;
@@ -197,7 +204,7 @@ render_html(
 
     @media (max-width: 640px) {
         .block-container { padding-top: 3.8rem !important; }
-        .app-title { font-size: 1.18rem; }
+        .app-title { font-size: 1.15rem; }
         .card-grid { grid-template-columns: 1fr; gap: 8px; }
         button[data-baseweb="tab"] { font-size: 0.78rem !important; padding: 6px 6px !important; }
     }
@@ -206,7 +213,7 @@ render_html(
 )
 
 IST = timezone(timedelta(hours=5, minutes=30))
-PORTFOLIO_FILE = "dummy_portfolio.json"
+LOCAL_DB_FILE = "local_users_db.json"
 
 POPULAR_STOCKS = {
     "RELIANCE": "Reliance Industries",
@@ -297,7 +304,6 @@ def now_ist() -> datetime:
 
 
 def is_market_open() -> bool:
-    """True strictly during live NSE/BSE trading hours: Mon-Fri, 9:15 AM - 3:30 PM IST."""
     n = now_ist()
     return n.weekday() < 5 and (9, 15) <= (n.hour, n.minute) <= (15, 30)
 
@@ -314,24 +320,470 @@ def rs_signed(val: float) -> str:
 
 
 # ------------------------------------------------------------------------------
-# DUMMY PORTFOLIO STORAGE
+# PRIVACY-FIRST MULTI-USER AUTH + PER-USER PERSONAL GOOGLE SHEETS STORAGE
+# Master Sheet = ONLY Login directory (username, full_name, hashed_pw, personal_sheet_url)
+# Each User's OWN Personal Google Sheet = wallet, holdings, history (100% private!)
 # ------------------------------------------------------------------------------
-def load_portfolio():
-    if os.path.exists(PORTFOLIO_FILE):
+AUTH_USERS_HEADERS = ["username", "full_name", "password_hash", "personal_sheet_url", "created_at"]
+PERSONAL_WALLET_HEADERS = ["cash", "total_deposited", "updated_at"]
+PERSONAL_HOLDINGS_HEADERS = ["id", "asset_type", "ticker", "name", "buy_price", "qty", "invested", "buy_date", "target_price", "stop_loss"]
+PERSONAL_HISTORY_HEADERS = ["Asset", "Qty", "Buy (₹)", "Sell (₹)", "P&L (₹)", "Return (%)", "Sold On"]
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000)
+    return f"{salt}:{dk.hex()}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        salt, expected_hex = stored_hash.split(":", 1)
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000)
+        return secrets.compare_digest(dk.hex(), expected_hex)
+    except Exception:
+        return False
+
+
+def _gsheets_configured() -> bool:
+    if not GSHEETS_LIBS_OK:
+        return False
+    try:
+        return ("gcp_service_account" in st.secrets) and ("sheet_url" in st.secrets)
+    except Exception:
+        return False
+
+
+def get_bot_email() -> str:
+    try:
+        return str(st.secrets["gcp_service_account"].get("client_email", ""))
+    except Exception:
+        return ""
+
+
+@st.cache_resource(show_spinner=False)
+def _get_gspread_client():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=scopes)
+    return gspread.authorize(creds)
+
+
+def _get_or_create_ws(sh, title: str, headers: list):
+    try:
+        ws = sh.worksheet(title)
+        if not ws.row_values(1):
+            ws.append_row(headers)
+        return ws
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=title, rows=1000, cols=len(headers))
+        ws.append_row(headers)
+        return ws
+
+
+def _get_master_auth_ws():
+    """Master sheet holds ONLY account login directory — zero user trading data."""
+    gc = _get_gspread_client()
+    sh = gc.open_by_url(st.secrets["sheet_url"])
+    ws = _get_or_create_ws(sh, "users", AUTH_USERS_HEADERS)
+    # Upgrade older master sheet header smoothly if needed
+    hdr = ws.row_values(1)
+    if "personal_sheet_url" not in hdr:
+        ws.update_cell(1, len(hdr) + 1, "personal_sheet_url")
+    return ws
+
+
+def _open_personal_sheet(personal_url: str):
+    """Connects directly to the logged-in user's OWN Google Sheet and initializes 3 private tabs."""
+    url = personal_url.strip()
+    if not url.startswith("https://docs.google.com/spreadsheets/"):
+        raise ValueError("Please paste a valid Google Sheet link starting with https://docs.google.com/spreadsheets/")
+
+    gc = _get_gspread_client()
+    try:
+        sh = gc.open_by_url(url)
+    except Exception:
+        bot = get_bot_email()
+        raise PermissionError(
+            f"Cannot open your Google Sheet! Open your sheet → click Share → add **{bot}** as **Editor** → try again."
+        )
+
+    ws_wallet = _get_or_create_ws(sh, "wallet", PERSONAL_WALLET_HEADERS)
+    if len(ws_wallet.get_all_values()) < 2:
+        ws_wallet.append_row([100000.0, 100000.0, now_ist().strftime("%Y-%m-%d %H:%M IST")])
+
+    ws_holdings = _get_or_create_ws(sh, "holdings", PERSONAL_HOLDINGS_HEADERS)
+    ws_history = _get_or_create_ws(sh, "history", PERSONAL_HISTORY_HEADERS)
+    return ws_wallet, ws_holdings, ws_history
+
+
+def _load_local_db() -> dict:
+    if os.path.exists(LOCAL_DB_FILE):
         try:
-            with open(PORTFOLIO_FILE, "r") as f:
-                data = json.load(f)
-                if "total_deposited" not in data:
-                    data["total_deposited"] = 100000.0
-                return data
+            with open(LOCAL_DB_FILE, "r") as f:
+                return json.load(f)
         except Exception:
             pass
-    return {"cash": 100000.0, "total_deposited": 100000.0, "holdings": [], "history": []}
+    return {"users": {}}
 
 
-def save_portfolio(data):
-    with open(PORTFOLIO_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+def _save_local_db(db: dict):
+    with open(LOCAL_DB_FILE, "w") as f:
+        json.dump(db, f, indent=2)
+
+
+def db_register_user(username: str, full_name: str, password: str, personal_sheet_url: str = "") -> tuple[bool, str]:
+    uname = username.strip().lower()
+    if not re.match(r"^[a-z0-9_]{3,20}$", uname):
+        return False, "Username must be 3–20 characters (letters, numbers, or underscore only)."
+    if len(password) < 4:
+        return False, "Password must be at least 4 characters."
+
+    p_url = personal_sheet_url.strip()
+    pw_hash = hash_password(password)
+    created = now_ist().strftime("%Y-%m-%d %H:%M IST")
+
+    if _gsheets_configured():
+        # Verify user's personal Google Sheet first if they provided one
+        if p_url:
+            try:
+                _open_personal_sheet(p_url)
+            except Exception as e:
+                return False, str(e)
+
+        try:
+            ws_users = _get_master_auth_ws()
+            existing = ws_users.col_values(1)
+            if uname in [str(u).strip().lower() for u in existing[1:]]:
+                return False, "Username already exists. Please choose another or log in."
+
+            hdr = ws_users.row_values(1)
+            row_map = {
+                "username": uname,
+                "full_name": full_name.strip() or uname,
+                "password_hash": pw_hash,
+                "personal_sheet_url": p_url,
+                "created_at": created,
+            }
+            new_row = [row_map.get(col, "") for col in hdr]
+            ws_users.append_row(new_row)
+            return True, "Account created! Your private Google Sheet is connected." if p_url else "Account created! Link your personal Google Sheet in the Dummy tab to save permanently."
+        except Exception as e:
+            return False, f"Auth database error: {e}"
+    else:
+        db = _load_local_db()
+        if uname in db["users"]:
+            return False, "Username already exists."
+        db["users"][uname] = {
+            "full_name": full_name.strip() or uname,
+            "password_hash": pw_hash,
+            "personal_sheet_url": p_url,
+            "cash": 100000.0,
+            "total_deposited": 100000.0,
+            "created_at": created,
+            "holdings": [],
+            "history": [],
+        }
+        _save_local_db(db)
+        return True, "Account created locally!"
+
+
+def db_authenticate_user(username: str, password: str) -> tuple[bool, str, dict | None]:
+    uname = username.strip().lower()
+    if _gsheets_configured():
+        try:
+            ws_users = _get_master_auth_ws()
+            for r in ws_users.get_all_records():
+                if str(r.get("username", "")).strip().lower() == uname:
+                    if verify_password(password, str(r.get("password_hash", ""))):
+                        return True, "Welcome back!", {
+                            "username": uname,
+                            "full_name": str(r.get("full_name", uname)),
+                            "personal_sheet_url": str(r.get("personal_sheet_url", "")).strip(),
+                        }
+                    return False, "Incorrect password.", None
+            return False, "Username not found. Please Create Account first.", None
+        except Exception as e:
+            return False, f"Login error: {e}", None
+    else:
+        db = _load_local_db()
+        u = db["users"].get(uname)
+        if not u:
+            return False, "Username not found. Please Create Account first.", None
+        if verify_password(password, u["password_hash"]):
+            return True, "Welcome back!", {
+                "username": uname,
+                "full_name": u.get("full_name", uname),
+                "personal_sheet_url": u.get("personal_sheet_url", ""),
+            }
+        return False, "Incorrect password.", None
+
+
+def db_update_personal_sheet_url(username: str, new_url: str, current_portfolio: dict) -> tuple[bool, str]:
+    """Tests user's personal Google Sheet, saves link to their profile, and loads/syncs data."""
+    uname = username.strip().lower()
+    p_url = new_url.strip()
+    if not _gsheets_configured():
+        return False, "Google Sheets Cloud Secrets are not configured on this server yet."
+
+    try:
+        ws_wallet, ws_holdings, ws_history = _open_personal_sheet(p_url)
+    except Exception as e:
+        return False, str(e)
+
+    try:
+        ws_users = _get_master_auth_ws()
+        hdr = ws_users.row_values(1)
+        url_col = hdr.index("personal_sheet_url") + 1
+        col_a = ws_users.col_values(1)
+        for idx, val in enumerate(col_a[1:], start=2):
+            if str(val).strip().lower() == uname:
+                ws_users.update_cell(idx, url_col, p_url)
+                break
+
+        # If personal sheet is brand new (no trades yet) and user had temporary session trades, migrate them!
+        if len(ws_holdings.get_all_values()) <= 1 and current_portfolio.get("holdings"):
+            ws_wallet.update_cell(2, 1, round(current_portfolio["cash"], 2))
+            ws_wallet.update_cell(2, 2, round(current_portfolio["total_deposited"], 2))
+            ws_wallet.update_cell(2, 3, now_ist().strftime("%Y-%m-%d %H:%M IST"))
+            for h in current_portfolio["holdings"]:
+                ws_holdings.append_row([str(h["id"]), h["asset_type"], h["ticker"], h["name"], h["buy_price"], h["qty"], h["invested"], h["buy_date"], h["target_price"], h["stop_loss"]])
+
+        return True, "Connected! All your trades are now saved privately in YOUR own Google Sheet."
+    except Exception as e:
+        return False, f"Failed to link sheet: {e}"
+
+
+def db_fetch_user_portfolio(user_obj: dict) -> dict:
+    uname = user_obj["username"]
+    p_url = user_obj.get("personal_sheet_url", "").strip()
+
+    if _gsheets_configured():
+        if not p_url:
+            # No personal sheet connected yet: strictly session-only (NEVER writes to master sheet!)
+            return {"cash": 100000.0, "total_deposited": 100000.0, "holdings": [], "history": []}
+        try:
+            ws_wallet, ws_holdings, ws_history = _open_personal_sheet(p_url)
+            w_recs = ws_wallet.get_all_records()
+            cash = float(w_recs[0].get("cash", 100000.0)) if w_recs else 100000.0
+            total_dep = float(w_recs[0].get("total_deposited", 100000.0)) if w_recs else 100000.0
+
+            holdings = []
+            for r in ws_holdings.get_all_records():
+                holdings.append(
+                    {
+                        "id": str(r.get("id")),
+                        "asset_type": str(r.get("asset_type", "STOCK")),
+                        "ticker": str(r.get("ticker", "")),
+                        "name": str(r.get("name", "")),
+                        "buy_price": float(r.get("buy_price", 0)),
+                        "qty": float(r.get("qty", 0)) if str(r.get("asset_type")) == "MF" else int(float(r.get("qty", 0))),
+                        "invested": float(r.get("invested", 0)),
+                        "buy_date": str(r.get("buy_date", "")),
+                        "target_price": float(r.get("target_price", 0)),
+                        "stop_loss": float(r.get("stop_loss", 0)),
+                    }
+                )
+
+            history = []
+            for r in ws_history.get_all_records():
+                history.append(
+                    {
+                        "Asset": str(r.get("Asset", "")),
+                        "Qty": r.get("Qty", 0),
+                        "Buy (₹)": float(r.get("Buy (₹)", 0)),
+                        "Sell (₹)": float(r.get("Sell (₹)", 0)),
+                        "P&L (₹)": float(r.get("P&L (₹)", 0)),
+                        "Return (%)": float(r.get("Return (%)", 0)),
+                        "Sold On": str(r.get("Sold On", "")),
+                    }
+                )
+            return {"cash": cash, "total_deposited": total_dep, "holdings": holdings, "history": history}
+        except Exception as e:
+            st.warning(f"Could not read your personal Google Sheet: {e}")
+            return {"cash": 100000.0, "total_deposited": 100000.0, "holdings": [], "history": []}
+    else:
+        db = _load_local_db()
+        u = db["users"].get(uname, {})
+        return {
+            "cash": float(u.get("cash", 100000.0)),
+            "total_deposited": float(u.get("total_deposited", 100000.0)),
+            "holdings": list(u.get("holdings", [])),
+            "history": list(u.get("history", [])),
+        }
+
+
+def db_record_buy(user_obj: dict, holding: dict, new_cash: float, total_deposited: float):
+    uname = user_obj["username"]
+    p_url = user_obj.get("personal_sheet_url", "").strip()
+    if _gsheets_configured():
+        if p_url:
+            ws_wallet, ws_holdings, _ = _open_personal_sheet(p_url)
+            ws_wallet.update_cell(2, 1, round(new_cash, 2))
+            ws_wallet.update_cell(2, 2, round(total_deposited, 2))
+            ws_wallet.update_cell(2, 3, now_ist().strftime("%Y-%m-%d %H:%M IST"))
+            ws_holdings.append_row([str(holding["id"]), holding["asset_type"], holding["ticker"], holding["name"], holding["buy_price"], holding["qty"], holding["invested"], holding["buy_date"], holding["target_price"], holding["stop_loss"]])
+    else:
+        db = _load_local_db()
+        if uname in db["users"]:
+            db["users"][uname]["cash"] = round(new_cash, 2)
+            db["users"][uname]["total_deposited"] = round(total_deposited, 2)
+            db["users"][uname]["holdings"].append(holding)
+            _save_local_db(db)
+
+
+def db_record_sell(user_obj: dict, holding_id: str, history_row: dict, new_cash: float, total_deposited: float):
+    uname = user_obj["username"]
+    p_url = user_obj.get("personal_sheet_url", "").strip()
+    if _gsheets_configured():
+        if p_url:
+            ws_wallet, ws_holdings, ws_history = _open_personal_sheet(p_url)
+            ws_wallet.update_cell(2, 1, round(new_cash, 2))
+            ws_wallet.update_cell(2, 2, round(total_deposited, 2))
+            ws_wallet.update_cell(2, 3, now_ist().strftime("%Y-%m-%d %H:%M IST"))
+            rows = ws_holdings.get_all_values()
+            for idx in range(len(rows) - 1, 0, -1):
+                if str(rows[idx][0]) == str(holding_id):
+                    ws_holdings.delete_rows(idx + 1)
+                    break
+            ws_history.append_row([history_row["Asset"], history_row["Qty"], history_row["Buy (₹)"], history_row["Sell (₹)"], history_row["P&L (₹)"], history_row["Return (%)"], history_row["Sold On"]])
+    else:
+        db = _load_local_db()
+        if uname in db["users"]:
+            db["users"][uname]["cash"] = round(new_cash, 2)
+            db["users"][uname]["holdings"] = [h for h in db["users"][uname]["holdings"] if str(h["id"]) != str(holding_id)]
+            db["users"][uname]["history"].append(history_row)
+            _save_local_db(db)
+
+
+def db_add_cash(user_obj: dict, new_cash: float, new_deposited: float):
+    uname = user_obj["username"]
+    p_url = user_obj.get("personal_sheet_url", "").strip()
+    if _gsheets_configured():
+        if p_url:
+            ws_wallet, _, _ = _open_personal_sheet(p_url)
+            ws_wallet.update_cell(2, 1, round(new_cash, 2))
+            ws_wallet.update_cell(2, 2, round(new_deposited, 2))
+            ws_wallet.update_cell(2, 3, now_ist().strftime("%Y-%m-%d %H:%M IST"))
+    else:
+        db = _load_local_db()
+        if uname in db["users"]:
+            db["users"][uname]["cash"] = round(new_cash, 2)
+            db["users"][uname]["total_deposited"] = round(new_deposited, 2)
+            _save_local_db(db)
+
+
+def db_reset_user_wallet(user_obj: dict):
+    uname = user_obj["username"]
+    p_url = user_obj.get("personal_sheet_url", "").strip()
+    if _gsheets_configured():
+        if p_url:
+            ws_wallet, ws_holdings, ws_history = _open_personal_sheet(p_url)
+            ws_wallet.update_cell(2, 1, 100000.0)
+            ws_wallet.update_cell(2, 2, 100000.0)
+            ws_wallet.update_cell(2, 3, now_ist().strftime("%Y-%m-%d %H:%M IST"))
+            ws_holdings.clear()
+            ws_holdings.append_row(PERSONAL_HOLDINGS_HEADERS)
+            ws_history.clear()
+            ws_history.append_row(PERSONAL_HISTORY_HEADERS)
+    else:
+        db = _load_local_db()
+        if uname in db["users"]:
+            db["users"][uname]["cash"] = 100000.0
+            db["users"][uname]["total_deposited"] = 100000.0
+            db["users"][uname]["holdings"] = []
+            db["users"][uname]["history"] = []
+            _save_local_db(db)
+
+
+def get_session_portfolio() -> dict:
+    if "user_portfolio" not in st.session_state:
+        st.session_state["user_portfolio"] = db_fetch_user_portfolio(st.session_state["auth_user"])
+    return st.session_state["user_portfolio"]
+
+
+# ------------------------------------------------------------------------------
+# LOGIN / PRIVATE PERSONAL GOOGLE SHEET SIGN-UP GATE
+# ------------------------------------------------------------------------------
+if "auth_user" not in st.session_state:
+    gs_ready = _gsheets_configured()
+    storage_msg = (
+        "🔒 Privacy-First Cloud Mode (Each User Uses Their Own Google Sheet)"
+        if gs_ready
+        else "💾 Local Mode (Add Google Secrets on Streamlit Cloud for Personal Sheets)"
+    )
+    render_html(
+        f"""
+        <div class="auth-box">
+            <div style="font-size:1.5rem; font-weight:800;">📈 India Stock, SIP &amp; Gold</div>
+            <div style="font-size:0.83rem; opacity:0.75; margin-top:4px;">
+                Live NSE/BSE Guide · Private Per-User Dummy Trading
+            </div>
+            <div style="margin-top:10px;"><span class="status-pill status-user">{storage_msg}</span></div>
+        </div>
+        """
+    )
+
+    _, mid_col, _ = st.columns([1, 1.8, 1])
+    with mid_col:
+        auth_t1, auth_t2 = st.tabs(["🔐 Login", "✨ Create Account"])
+
+        with auth_t1:
+            with st.form("login_form"):
+                l_user = st.text_input("Username", placeholder="e.g. saurabh")
+                l_pass = st.text_input("Password", type="password", placeholder="Enter your password")
+                if st.form_submit_button("Login", type="primary", use_container_width=True):
+                    ok, msg, user_obj = db_authenticate_user(l_user, l_pass)
+                    if ok and user_obj:
+                        st.session_state["auth_user"] = user_obj
+                        st.session_state["user_portfolio"] = db_fetch_user_portfolio(user_obj)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+        with auth_t2:
+            if gs_ready:
+                bot_email = get_bot_email()
+                st.info(
+                    "**Keep your dummy trades 100% private in YOUR own Google Sheet:**\n"
+                    "1. Open [sheets.new](https://sheets.new) to create your own blank Google Sheet.\n"
+                    "2. Click **Share** → add the bot email below as **Editor** → **Send**.\n"
+                    "3. Paste your Google Sheet link below!"
+                )
+                st.code(bot_email, language=None)
+
+            with st.form("signup_form"):
+                s_name = st.text_input("Full Name", placeholder="e.g. Saurabh Chaki")
+                s_user = st.text_input("Choose Username (letters/numbers)", placeholder="e.g. saurabh")
+                s_pass1 = st.text_input("Create Password", type="password")
+                s_pass2 = st.text_input("Confirm Password", type="password")
+                s_sheet = st.text_input(
+                    "Your Personal Google Sheet URL (Recommended — Keeps Your Trades 100% Private)",
+                    placeholder="https://docs.google.com/spreadsheets/d/...",
+                ) if gs_ready else ""
+
+                if st.form_submit_button("Create Account (₹1,00,000 Dummy Cash)", type="primary", use_container_width=True):
+                    if s_pass1 != s_pass2:
+                        st.error("Passwords do not match.")
+                    else:
+                        ok, msg = db_register_user(s_user, s_name, s_pass1, s_sheet)
+                        if ok:
+                            uname = s_user.strip().lower()
+                            user_obj = {
+                                "username": uname,
+                                "full_name": s_name.strip() or uname,
+                                "personal_sheet_url": s_sheet.strip(),
+                            }
+                            st.session_state["auth_user"] = user_obj
+                            st.session_state["user_portfolio"] = db_fetch_user_portfolio(user_obj)
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+    st.stop()
 
 
 # ------------------------------------------------------------------------------
@@ -435,7 +887,7 @@ def render_mf_cards(df: pd.DataFrame, ranked: bool = True):
 
 
 # ------------------------------------------------------------------------------
-# LIVE NEWS & DIRECTORY HELPERS
+# NEWS, DIRECTORY & MARKET DATA ENGINES
 # ------------------------------------------------------------------------------
 def score_headline(title: str) -> str:
     text = title.lower()
@@ -511,25 +963,14 @@ def search_yahoo_india(query: str) -> list:
     return []
 
 
-# ------------------------------------------------------------------------------
-# CALIBRATED QUICK WIN ENGINE (UNIQUE TARGETS + GRADED SCORES + PRO-RATED VOL)
-# ------------------------------------------------------------------------------
 @st.cache_data(ttl=15, show_spinner=False)
 def scan_instant_win_setups(exchange: str) -> pd.DataFrame:
-    """
-    Calibrated 15-min intraday scanner:
-    - Uses each stock's actual daily High-Low swing for unique % Up targets & % Down stops.
-    - Uses full-session pro-rated volume (fixes 3:15 PM closing-bell false spikes).
-    - Uses smooth graded scoring (eliminates ties at 92%).
-    """
     suffix = ".NS" if exchange == "NSE" else ".BO"
     tickers = [f"{sym}{suffix}" for sym in POPULAR_STOCKS.keys()]
-
     try:
         raw = yf.download(tickers, period="5d", interval="15m", group_by="ticker", progress=False, auto_adjust=True)
     except Exception:
         return pd.DataFrame()
-
     if raw is None or raw.empty:
         return pd.DataFrame()
 
@@ -542,7 +983,6 @@ def scan_instant_win_setups(exchange: str) -> pd.DataFrame:
             sub = raw[full_ticker].dropna().copy() if len(tickers) > 1 else raw.dropna().copy()
             if len(sub) < 25:
                 continue
-
             if sub.index.tz is not None:
                 sub.index = sub.index.tz_convert("Asia/Kolkata")
 
@@ -557,88 +997,70 @@ def scan_instant_win_setups(exchange: str) -> pd.DataFrame:
             prev_close = float(prev_bars["Close"].iloc[-1]) if not prev_bars.empty else float(today_bars["Open"].iloc[0])
             day_pct = ((price - prev_close) / (prev_close + eps)) * 100.0
 
-            # True Intraday VWAP for latest session
             tp = (today_bars["High"] + today_bars["Low"] + today_bars["Close"]) / 3.0
             t_vol_sum = float(today_bars["Volume"].sum())
             vwap = float((tp * today_bars["Volume"]).sum() / t_vol_sum) if t_vol_sum > 0 else price
             above_vwap = price >= vwap
             vwap_pct = ((price - vwap) / (vwap + eps)) * 100.0
 
-            # EMA 9 vs EMA 21 spread (%)
             ema9 = float(close.ewm(span=9, adjust=False).mean().iloc[-1])
             ema21 = float(close.ewm(span=21, adjust=False).mean().iloc[-1])
             ema_bull = ema9 > ema21
             ema_spread_pct = ((ema9 - ema21) / (price + eps)) * 100.0
 
-            # 15m RSI (14)
             delta = close.diff()
             gain = float(delta.clip(lower=0).rolling(14).mean().iloc[-1])
             loss = float((-delta.clip(upper=0)).rolling(14).mean().iloc[-1])
             rsi = float(100.0 - (100.0 / (1.0 + gain / (loss + eps))))
 
-            # Pro-Rated Full-Day Volume Ratio (prevents fake 3:15 PM closing auction spike!)
             vol_spike = 1.0
             if not prev_bars.empty and t_vol_sum > 0:
                 prev_day_vols = prev_bars.groupby(prev_bars.index.date)["Volume"].sum()
                 avg_full_day_vol = float(prev_day_vols.mean())
                 if avg_full_day_vol > 0:
-                    # Full NSE session has ~25 15-min candles (9:15 to 15:30)
                     session_progress = min(1.0, max(len(today_bars) / 25.0, 0.08))
-                    expected_vol = avg_full_day_vol * session_progress
-                    vol_spike = round(t_vol_sum / (expected_vol + eps), 2)
+                    vol_spike = round(t_vol_sum / (avg_full_day_vol * session_progress + eps), 2)
 
-            # Stock-Specific Daily High-Low Range (%) over last 5 sessions for realistic Target & Stop
-            daily_groups = sub.groupby(sub.index.date)
             day_ranges = []
-            for _, grp in daily_groups:
+            for _, grp in sub.groupby(sub.index.date):
                 if len(grp) >= 5:
-                    rng = (float(grp["High"].max()) - float(grp["Low"].min())) / (float(grp["Close"].iloc[-1]) + eps)
-                    day_ranges.append(rng)
+                    day_ranges.append((float(grp["High"].max()) - float(grp["Low"].min())) / (float(grp["Close"].iloc[-1]) + eps))
             avg_day_range = float(sum(day_ranges) / len(day_ranges)) if day_ranges else 0.018
 
-            # Unique realistic Quick Target (+0.9% to +4.5%) & Tight Stop (-0.55% to -2.5%)
             up_pct = round(max(0.90, min(avg_day_range * 85.0, 4.50)), 2)
             down_pct = -round(max(0.55, min(avg_day_range * 48.0, 2.50)), 2)
             target_px = round(price * (1.0 + up_pct / 100.0), 2)
             stop_px = round(price * (1.0 + down_pct / 100.0), 2)
             rr = round(up_pct / max(abs(down_pct), 0.1), 1)
 
-            # Smooth Graded Setup Score (15% - 94%) — NO artificial ties!
             score = 46.0
-            score += max(-16.0, min(16.0, vwap_pct * 15.0))            # VWAP distance strength
-            score += max(-14.0, min(14.0, ema_spread_pct * 18.0))      # EMA 9/21 trend momentum
-
+            score += max(-16.0, min(16.0, vwap_pct * 15.0))
+            score += max(-14.0, min(14.0, ema_spread_pct * 18.0))
             if 45.0 <= rsi <= 68.0:
-                score += 11.0 - abs(rsi - 58.0) * 0.45                 # Peaks near RSI 58
+                score += 11.0 - abs(rsi - 58.0) * 0.45
             elif rsi <= 33.0:
-                score += 7.0                                           # Oversold bounce zone
+                score += 7.0
             elif rsi > 74.0:
-                score -= min(12.0, (rsi - 74.0) * 1.1)                 # Overheated penalty
+                score -= min(12.0, (rsi - 74.0) * 1.1)
 
             if day_pct > 0:
                 score += min(11.0, max(0.0, (vol_spike - 0.85) * 9.5))
             elif day_pct < -0.5:
                 score -= min(11.0, max(0.0, (vol_spike - 0.85) * 9.5))
 
-            score += max(-7.0, min(7.0, day_pct * 2.2))                # Intraday price confirmation
+            score += max(-7.0, min(7.0, day_pct * 2.2))
             score_int = int(round(max(15.0, min(94.0, score))))
 
-            # Action Flag & Category Bucket
             if above_vwap and ema_bull and vol_spike >= 1.15 and score_int >= 72 and rsi <= 72:
-                flag = "⚡ QUICK BREAKOUT BUY"
-                bucket = "BULLISH"
+                flag, bucket = "⚡ QUICK BREAKOUT BUY", "BULLISH"
             elif score_int >= 66 and above_vwap:
-                flag = "🔥 HIGH-MOMENTUM BUY"
-                bucket = "BULLISH"
+                flag, bucket = "🔥 HIGH-MOMENTUM BUY", "BULLISH"
             elif rsi <= 33:
-                flag = "🔄 OVERSOLD QUICK BOUNCE"
-                bucket = "BOUNCE"
+                flag, bucket = "🔄 OVERSOLD QUICK BOUNCE", "BOUNCE"
             elif score_int < 45:
-                flag = "🔴 AVOID / BEARISH PRESSURE"
-                bucket = "AVOID"
+                flag, bucket = "🔴 AVOID / BEARISH PRESSURE", "AVOID"
             else:
-                flag = "⏳ WAIT / SIDEWAYS"
-                bucket = "NEUTRAL"
+                flag, bucket = "⏳ WAIT / SIDEWAYS", "NEUTRAL"
 
             rows.append(
                 {
@@ -668,9 +1090,6 @@ def scan_instant_win_setups(exchange: str) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["Setup Score", "Today (%)"], ascending=False)
 
 
-# ------------------------------------------------------------------------------
-# MAIN STOCK, ETF & MUTUAL FUND ENGINES
-# ------------------------------------------------------------------------------
 def analyze_price_series(
     close: pd.Series,
     volume: pd.Series | None = None,
@@ -770,42 +1189,28 @@ def analyze_price_series(
     news_rising = (in_positive_news and daily_pct >= 0.5)
 
     if heavy_selling:
-        move_badge = "⚠️ HEAVY SELLING PRESSURE"
-        is_on_move = False
+        move_badge, is_on_move = "⚠️ HEAVY SELLING PRESSURE", False
     elif heavy_buying and news_rising:
-        move_badge = "🔥 HEAVY BUYING + NEWS"
-        is_on_move = True
+        move_badge, is_on_move = "🔥 HEAVY BUYING + NEWS", True
     elif heavy_buying:
-        move_badge = "🔥 HEAVY BUYING SURGE"
-        is_on_move = True
+        move_badge, is_on_move = "🔥 HEAVY BUYING SURGE", True
     elif news_rising:
-        move_badge = "📰 POSITIVE NEWS & RISING"
-        is_on_move = True
+        move_badge, is_on_move = "📰 POSITIVE NEWS & RISING", True
     elif price > ma20 and weekly_pct >= 2.0 and rsi < 70:
-        move_badge = "🚀 STARTING TO RISE"
-        is_on_move = True
+        move_badge, is_on_move = "🚀 STARTING TO RISE", True
     elif monthly_pct >= 4.0 and score >= 65:
-        move_badge = "🏆 STEADY PROFIT MAKER"
-        is_on_move = False
+        move_badge, is_on_move = "🏆 STEADY PROFIT MAKER", False
     elif rsi < 35:
-        move_badge = "💡 OVERSOLD DIP"
-        is_on_move = False
+        move_badge, is_on_move = "💡 OVERSOLD DIP", False
     else:
-        move_badge = "➡️ NORMAL ACTIVITY"
-        is_on_move = False
+        move_badge, is_on_move = "➡️ NORMAL ACTIVITY", False
 
     if score >= 70:
-        trend = "Going Up 📈"
-        action = "BUY"
-        reason = "Strong upward trend above 20 & 50-day averages with active buyer interest."
+        trend, action, reason = "Going Up 📈", "BUY", "Strong upward trend above 20 & 50-day averages with active buyer interest."
     elif score >= 50:
-        trend = "Steady ➡️"
-        action = "HOLD / WATCH"
-        reason = "Steady movement. Good to hold or wait for a clearer breakout."
+        trend, action, reason = "Steady ➡️", "HOLD / WATCH", "Steady movement. Good to hold or wait for a clearer breakout."
     else:
-        trend = "Going Down 📉"
-        action = "AVOID / SELL"
-        reason = "Trading below recent averages with weak momentum (wait for selling to stabilize)."
+        trend, action, reason = "Going Down 📉", "AVOID / SELL", "Trading below recent averages with weak momentum (wait for selling to stabilize)."
 
     return {
         "price": round(price, 2),
@@ -845,6 +1250,7 @@ def _fetch_market_history(exchange: str):
 
 @st.cache_data(ttl=12, show_spinner=False)
 def _fetch_live_1m_prices(tickers: tuple) -> dict:
+    """Upgrade Hook: Replace this function with Angel One SmartAPI / Upstox / Dhan LTP API for 0-sec ticks."""
     live_prices = {}
     if not tickers:
         return live_prices
@@ -987,10 +1393,7 @@ def scan_top_mutual_funds() -> pd.DataFrame:
                     return 0.0
                 return round((((latest_nav / float(past["nav"].iloc[-1])) ** (1 / yrs)) - 1) * 100, 1)
 
-            r1y = cagr(1)
-            r3y = cagr(3)
-            r1m = info["monthly_pct"]
-
+            r1y, r3y, r1m = cagr(1), cagr(3), info["monthly_pct"]
             start_dt = latest_dt - pd.DateOffset(years=3)
             sip_slice = df[df.index >= start_dt]
             monthly_pts = sip_slice.groupby(sip_slice.index.to_period("M")).head(1)
@@ -1001,17 +1404,13 @@ def scan_top_mutual_funds() -> pd.DataFrame:
             profit_pct = round((profit_rs / max(invested, 1)) * 100, 1)
 
             if r1m >= 2.5 and r1y >= 10:
-                status = "🔥 ON THE MOVE"
-                is_hot = True
+                status, is_hot = "🔥 ON THE MOVE", True
             elif r3y >= 15 and r1m < 0:
-                status = "💡 GREAT TIME TO START SIP"
-                is_hot = True
+                status, is_hot = "💡 GREAT TIME TO START SIP", True
             elif r3y >= 14:
-                status = "🏆 TOP PROFIT SIP"
-                is_hot = False
+                status, is_hot = "🏆 TOP PROFIT SIP", False
             else:
-                status = "➡️ STEADY COMPOUNDER"
-                is_hot = False
+                status, is_hot = "➡️ STEADY COMPOUNDER", False
 
             sign = "-" if profit_rs < 0 else "+"
             return {
@@ -1034,9 +1433,7 @@ def scan_top_mutual_funds() -> pd.DataFrame:
         results = list(ex.map(_process_one, POPULAR_MFS.items()))
 
     valid = [r for r in results if r is not None]
-    if not valid:
-        return pd.DataFrame()
-    return pd.DataFrame(valid).sort_values("ProfitVal", ascending=False)
+    return pd.DataFrame(valid).sort_values("ProfitVal", ascending=False) if valid else pd.DataFrame()
 
 
 def predict_when_to_sell(holding: dict, live_info: dict) -> tuple[str, str]:
@@ -1064,20 +1461,23 @@ def predict_when_to_sell(holding: dict, live_info: dict) -> tuple[str, str]:
 
 
 # ------------------------------------------------------------------------------
-# COMPACT MODERN HEADER + AUTOMATIC MARKET-CLOSE FREEZE
+# LOGGED-IN APP HEADER + CONTROLS
 # ------------------------------------------------------------------------------
+ACTIVE_USER = st.session_state["auth_user"]
 MARKET_OPEN = is_market_open()
 
 mkt_badge = (
-    '<span class="status-pill status-open">● Market OPEN (Live)</span>'
+    '<span class="status-pill status-open">● Market OPEN</span>'
     if MARKET_OPEN
-    else '<span class="status-pill status-closed">🔒 Market Closed (Frozen)</span>'
+    else '<span class="status-pill status-closed">🔒 Market Closed</span>'
 )
+user_badge = f'<span class="status-pill status-user">👤 {html.escape(ACTIVE_USER["full_name"])}</span>'
+
 render_html(
     f"""
     <div class="app-header">
-        <div class="app-title">📈 India Stock, SIP & Gold</div>
-        <div>{mkt_badge}</div>
+        <div class="app-title">📈 India Stock, SIP &amp; Gold</div>
+        <div class="header-badges">{user_badge}{mkt_badge}</div>
     </div>
     """
 )
@@ -1092,7 +1492,7 @@ if not MARKET_OPEN:
         """
     )
 
-ctrl1, ctrl2, ctrl3 = st.columns([1.2, 1.4, 0.9])
+ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([1.1, 1.2, 0.9, 0.8])
 exchange = ctrl1.radio("Exchange", ["NSE", "BSE"], horizontal=True, label_visibility="collapsed")
 live_mode = ctrl2.toggle("🔴 Live (15s)", value=MARKET_OPEN, disabled=not MARKET_OPEN)
 if MARKET_OPEN:
@@ -1104,32 +1504,24 @@ if MARKET_OPEN:
 else:
     ctrl3.button("❄️ Frozen", disabled=True, use_container_width=True)
 
-# Automatically freeze all auto-updates once market closes!
+if ctrl4.button("🚪 Logout", use_container_width=True):
+    st.session_state.pop("auth_user", None)
+    st.session_state.pop("user_portfolio", None)
+    st.rerun()
+
 AUTO_INTERVAL = 15 if (MARKET_OPEN and live_mode) else None
 
-tab_quick, tab1, tab2, tab3, tab4 = st.tabs(
-    [
-        "⚡ Quick",
-        "🏆 Top 10",
-        "🔍 Search",
-        "🪙 SIP",
-        "🎮 Dummy",
-    ]
-)
+tab_quick, tab1, tab2, tab3, tab4 = st.tabs(["⚡ Quick", "🏆 Top 10", "🔍 Search", "🪙 SIP", "🎮 Dummy"])
 
 # ==============================================================================
-# TAB 0: CALIBRATED QUICK WIN SETUPS (UNIQUE TARGETS + GRADED SCORES)
+# TAB 0: QUICK WIN SETUPS
 # ==============================================================================
 with tab_quick:
     @st.fragment(run_every=AUTO_INTERVAL)
     def render_instant_wins():
         render_html(f'<div class="sec-title">⚡ {exchange} Quick Win Setups (15-Min Indicators)</div>')
-        render_html(
-            '<div class="sec-sub">Graded short-term momentum setups using VWAP, EMA 9/21, RSI, Pro-Rated Volume & each stock\'s real daily volatility. '
-            'Always respect the Stop-Loss!</div>'
-        )
-        status_note = f"⏱️ Live Scan {now_ist().strftime('%I:%M:%S %p IST')}" if MARKET_OPEN else "❄️ Frozen at Last Market Close (3:30 PM IST)"
-        st.caption(status_note)
+        render_html('<div class="sec-sub">Graded setups using VWAP, EMA 9/21, RSI, Pro-Rated Volume &amp; real daily volatility.</div>')
+        st.caption(f"⏱️ Live Scan {now_ist().strftime('%I:%M:%S %p IST')}" if MARKET_OPEN else "❄️ Frozen at Last Market Close (3:30 PM IST)")
 
         qdf = scan_instant_win_setups(exchange)
         if qdf.empty:
@@ -1138,22 +1530,10 @@ with tab_quick:
 
         if MARKET_OPEN:
             f_col1, f_col2 = st.columns([1.6, 1])
-            q_filter = f_col1.radio(
-                "Filter Setups",
-                ["🔥 Top Quick Buys", "🔄 Oversold Bounces", "🔴 Weak / Avoid", "All 30"],
-                horizontal=True,
-                label_visibility="collapsed",
-                key="quick_filter",
-            )
+            q_filter = f_col1.radio("Filter", ["🔥 Top Quick Buys", "🔄 Oversold Bounces", "🔴 Weak / Avoid", "All 30"], horizontal=True, label_visibility="collapsed", key="quick_filter")
             quick_buy_amt = f_col2.selectbox("1-Tap Dummy Size (₹)", [5000, 10000, 25000, 50000, 100000], index=1, key="quick_buy_amt")
         else:
-            q_filter = st.radio(
-                "Filter Setups",
-                ["🔥 Top Quick Buys", "🔄 Oversold Bounces", "🔴 Weak / Avoid", "All 30"],
-                horizontal=True,
-                label_visibility="collapsed",
-                key="quick_filter",
-            )
+            q_filter = st.radio("Filter", ["🔥 Top Quick Buys", "🔄 Oversold Bounces", "🔴 Weak / Avoid", "All 30"], horizontal=True, label_visibility="collapsed", key="quick_filter")
             quick_buy_amt = 10000
 
         if q_filter == "🔥 Top Quick Buys":
@@ -1170,7 +1550,7 @@ with tab_quick:
         else:
             show_df = qdf
 
-        portfolio = load_portfolio()
+        portfolio = get_session_portfolio()
         if MARKET_OPEN:
             st.caption(f"Available Dummy Cash: **₹{portfolio['cash']:,.2f}**")
 
@@ -1210,7 +1590,6 @@ with tab_quick:
                     """
                 )
 
-                # Trading button ONLY visible while Indian Market is OPEN
                 if MARKET_OPEN:
                     if st.button(f"⚡ Quick Dummy Buy ₹{quick_buy_amt:,} — {sym.replace('.NS', '').replace('.BO', '')}", key=f"qbuy_{sym}_{idx}", use_container_width=True):
                         qty = int(quick_buy_amt // r["Price (₹)"])
@@ -1218,25 +1597,25 @@ with tab_quick:
                         if qty <= 0:
                             st.warning("Increase 1-Tap Dummy Size to buy at least 1 share.")
                         elif cost > portfolio["cash"]:
-                            st.error("Not enough dummy cash! Add more virtual cash in the **🎮 Dummy** tab.")
+                            st.error("Not enough dummy cash! Add more in **🎮 Dummy** tab.")
                         else:
-                            portfolio["cash"] = round(portfolio["cash"] - cost, 2)
-                            portfolio["holdings"].append(
-                                {
-                                    "id": int(now_ist().timestamp() * 1000) + idx,
-                                    "asset_type": "STOCK",
-                                    "ticker": sym,
-                                    "name": f"⚡ {r['Company']} (Quick)",
-                                    "buy_price": r["Price (₹)"],
-                                    "qty": qty,
-                                    "invested": cost,
-                                    "buy_date": now_ist().strftime("%d %b, %I:%M %p"),
-                                    "target_price": r["Target (₹)"],
-                                    "stop_loss": r["Stop (₹)"],
-                                }
-                            )
-                            save_portfolio(portfolio)
-                            st.success(f"Bought {qty} dummy shares of **{r['Company']}** for ₹{cost:,.2f}! Track live in **🎮 Dummy**.")
+                            new_cash = round(portfolio["cash"] - cost, 2)
+                            holding = {
+                                "id": str(int(now_ist().timestamp() * 1000) + idx),
+                                "asset_type": "STOCK",
+                                "ticker": sym,
+                                "name": f"⚡ {r['Company']} (Quick)",
+                                "buy_price": r["Price (₹)"],
+                                "qty": qty,
+                                "invested": cost,
+                                "buy_date": now_ist().strftime("%d %b, %I:%M %p"),
+                                "target_price": r["Target (₹)"],
+                                "stop_loss": r["Stop (₹)"],
+                            }
+                            db_record_buy(ACTIVE_USER, holding, new_cash, portfolio["total_deposited"])
+                            portfolio["cash"] = new_cash
+                            portfolio["holdings"].append(holding)
+                            st.success(f"Saved privately! Bought {qty} dummy shares of **{r['Company']}**.")
 
         with st.expander("📊 View All 30 Stocks Quick-Win Indicator Table"):
             st.dataframe(
@@ -1248,7 +1627,7 @@ with tab_quick:
     render_instant_wins()
 
 # ==============================================================================
-# TAB 1: TOP 10 STOCKS, ON-THE-MOVE BUZZ & BOTTOM PERFORMERS
+# TAB 1: TOP 10 STOCKS & BOTTOM PERFORMERS
 # ==============================================================================
 with tab1:
     stock_news = fetch_live_news("NSE BSE Indian stocks rally buy volume surge", max_items=6)
@@ -1265,7 +1644,6 @@ with tab1:
         on_move_df = market_df[market_df["IsOnMove"]].sort_values("Score", ascending=False).head(6)
         render_html(f'<div class="sec-title">🔥 {exchange} On The Move</div>')
         render_html('<div class="sec-sub">Active buying surge, positive news, or fresh breakout</div>')
-
         if not on_move_df.empty:
             render_stock_cards(on_move_df)
         else:
@@ -1288,18 +1666,14 @@ with tab1:
             top10_tbl = top10.copy()
             top10_tbl.insert(0, "Rank", range(1, len(top10_tbl) + 1))
             st.dataframe(
-                top10_tbl[
-                    ["Rank", "Company", "Symbol", "Highlight", "Price (₹)", "Daily (%)", "Weekly (%)", "Monthly (%)", "Volume Activity", "Target Sell (₹)", "Safety Stop (₹)"]
-                ],
+                top10_tbl[["Rank", "Company", "Symbol", "Highlight", "Price (₹)", "Daily (%)", "Weekly (%)", "Monthly (%)", "Volume Activity", "Target Sell (₹)", "Safety Stop (₹)"]],
                 use_container_width=True,
                 hide_index=True,
             )
 
         render_html('<div class="sec-title">📉 Bottom Performers & Gainers</div>')
         period_choice = st.radio("Timeframe", ["Daily", "Weekly", "Monthly"], horizontal=True, label_visibility="collapsed", key="perf_tf")
-        col_map = {"Daily": "Daily (%)", "Weekly": "Weekly (%)", "Monthly": "Monthly (%)"}
-        sort_col = col_map[period_choice]
-
+        sort_col = {"Daily": "Daily (%)", "Weekly": "Weekly (%)", "Monthly": "Monthly (%)"}[period_choice]
         perf_sub = st.radio("Show", ["🔴 Bottom Performers", "🟢 Top Gainers"], horizontal=True, label_visibility="collapsed", key="perf_side")
         if perf_sub == "🔴 Bottom Performers":
             render_perf_cards(market_df.sort_values(sort_col, ascending=True).head(6), sort_col)
@@ -1309,25 +1683,16 @@ with tab1:
     render_live_market_board()
 
 # ==============================================================================
-# TAB 2: LIVE SEARCH + EXPECTED HIGH/LOW FORECAST + NEWS (BUY HIDDEN WHEN CLOSED)
+# TAB 2: LIVE SEARCH + HIGH/LOW FORECAST
 # ==============================================================================
 with tab2:
     render_html('<div class="sec-title">🔍 Search Any Indian Stock</div>')
 
     all_stocks = load_all_indian_stocks()
     option_map = {f"{name} ({sym})": sym for sym, name in sorted(all_stocks.items(), key=lambda x: x[1])}
+    selected_label = st.selectbox("Search:", options=list(option_map.keys()), index=None, placeholder="Type e.g. Apollo Tubes, Reliance, HAL...", label_visibility="collapsed")
 
-    selected_label = st.selectbox(
-        "Type company name for live suggestions:",
-        options=list(option_map.keys()),
-        index=None,
-        placeholder="Type e.g. Apollo Tubes, Reliance, HAL...",
-        label_visibility="collapsed",
-    )
-
-    full_ticker = None
-    display_name = None
-
+    full_ticker, display_name = None, None
     if selected_label:
         sym = option_map[selected_label]
         full_ticker = f"{sym}.NS" if exchange == "NSE" else f"{sym}.BO"
@@ -1340,8 +1705,7 @@ with tab2:
             if matches:
                 y_map = {f"{name} ({sym})": sym for sym, name in matches}
                 picked_y = st.selectbox("Select match:", list(y_map.keys()))
-                full_ticker = y_map[picked_y]
-                display_name = picked_y
+                full_ticker, display_name = y_map[picked_y], picked_y
             else:
                 st.warning("No matching Indian stocks found.")
 
@@ -1396,45 +1760,22 @@ with tab2:
             render_html(
                 f"""
                 <div class="grid-2col grid-2col-desktop4">
-                    <div class="kpi-box">
-                        <div class="kpi-label">Next 1–2 Days</div>
-                        <div class="range-hi">▲ ₹{sinfo['day_high']:,.2f}</div>
-                        <div class="range-lo">▼ ₹{sinfo['day_low']:,.2f}</div>
-                    </div>
-                    <div class="kpi-box">
-                        <div class="kpi-label">Next 1 Week</div>
-                        <div class="range-hi">▲ ₹{sinfo['week_high']:,.2f}</div>
-                        <div class="range-lo">▼ ₹{sinfo['week_low']:,.2f}</div>
-                    </div>
-                    <div class="kpi-box">
-                        <div class="kpi-label">Next 1 Month</div>
-                        <div class="range-hi">▲ ₹{sinfo['month_high']:,.2f}</div>
-                        <div class="range-lo">▼ ₹{sinfo['month_low']:,.2f}</div>
-                    </div>
-                    <div class="kpi-box">
-                        <div class="kpi-label">52-Wk Ceiling/Floor</div>
-                        <div class="range-hi">⬆️ ₹{sinfo['high_52w']:,.2f}</div>
-                        <div class="range-lo">⬇️ ₹{sinfo['low_52w']:,.2f}</div>
-                    </div>
+                    <div class="kpi-box"><div class="kpi-label">Next 1–2 Days</div><div class="range-hi">▲ ₹{sinfo['day_high']:,.2f}</div><div class="range-lo">▼ ₹{sinfo['day_low']:,.2f}</div></div>
+                    <div class="kpi-box"><div class="kpi-label">Next 1 Week</div><div class="range-hi">▲ ₹{sinfo['week_high']:,.2f}</div><div class="range-lo">▼ ₹{sinfo['week_low']:,.2f}</div></div>
+                    <div class="kpi-box"><div class="kpi-label">Next 1 Month</div><div class="range-hi">▲ ₹{sinfo['month_high']:,.2f}</div><div class="range-lo">▼ ₹{sinfo['month_low']:,.2f}</div></div>
+                    <div class="kpi-box"><div class="kpi-label">52-Wk Ceiling/Floor</div><div class="range-hi">⬆️ ₹{sinfo['high_52w']:,.2f}</div><div class="range-lo">⬇️ ₹{sinfo['low_52w']:,.2f}</div></div>
                 </div>
                 """
             )
 
             sdf_plot = sdf.tail(90).copy()
             sdf_plot["20-Day Avg"] = sdf["Close"].rolling(20).mean().tail(90)
-
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=sdf_plot.index, y=sdf_plot["Close"], name="Price (₹)", line=dict(color="#2563eb", width=2.4)))
             fig.add_trace(go.Scatter(x=sdf_plot.index, y=sdf_plot["20-Day Avg"], name="20D Trend", line=dict(color="#f59e0b", dash="dot", width=1.6)))
             fig.add_hline(y=sinfo["week_high"], line_dash="dash", line_color="#16a34a", annotation_text=f"1W Hi ₹{sinfo['week_high']}")
             fig.add_hline(y=sinfo["week_low"], line_dash="dash", line_color="#dc2626", annotation_text=f"1W Lo ₹{sinfo['week_low']}")
-            fig.update_layout(
-                height=290,
-                margin=dict(l=6, r=6, t=28, b=6),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-                xaxis=dict(fixedrange=True),
-                yaxis=dict(fixedrange=True),
-            )
+            fig.update_layout(height=290, margin=dict(l=6, r=6, t=28, b=6), legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True))
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
             clean_name = label_to_show.split("(")[0].strip()
@@ -1444,21 +1785,12 @@ with tab2:
                     for n in comp_news:
                         st.markdown(f"{n['mood']} · [{n['title']}]({n['link']}) `{n['published']}`")
 
-            # Dummy Buy Box ONLY shown when Indian Market is OPEN
             if MARKET_OPEN:
                 render_html('<div class="sec-title">🎮 Practice Dummy Buy</div>')
-                portfolio = load_portfolio()
+                portfolio = get_session_portfolio()
                 st.caption(f"Dummy Cash Available: **₹{portfolio['cash']:,.2f}**")
-
                 d1, d2 = st.columns([1.6, 1])
-                dummy_amt = d1.number_input(
-                    "Amount (₹)",
-                    min_value=500.0,
-                    max_value=max(500.0, float(portfolio["cash"])),
-                    value=min(10000.0, max(500.0, float(portfolio["cash"]))),
-                    step=500.0,
-                    key="stock_dummy_amt",
-                )
+                dummy_amt = d1.number_input("Amount (₹)", min_value=500.0, max_value=max(500.0, float(portfolio["cash"])), value=min(10000.0, max(500.0, float(portfolio["cash"]))), step=500.0, key="stock_dummy_amt")
                 qty = int(dummy_amt // sinfo["price"])
                 actual_cost = round(qty * sinfo["price"], 2)
                 st.caption(f"Buys **{qty} shares** @ ₹{sinfo['price']:,.2f} (Total: ₹{actual_cost:,.2f})")
@@ -1469,41 +1801,38 @@ with tab2:
                     elif actual_cost > portfolio["cash"]:
                         st.error("Not enough dummy cash! Add more in **🎮 Dummy** tab.")
                     else:
-                        portfolio["cash"] = round(portfolio["cash"] - actual_cost, 2)
-                        portfolio["holdings"].append(
-                            {
-                                "id": int(now_ist().timestamp() * 1000),
-                                "asset_type": "STOCK",
-                                "ticker": ticker_to_show,
-                                "name": label_to_show,
-                                "buy_price": sinfo["price"],
-                                "qty": qty,
-                                "invested": actual_cost,
-                                "buy_date": now_ist().strftime("%d %b, %I:%M %p"),
-                                "target_price": sinfo["sell_target"],
-                                "stop_loss": sinfo["stop_loss"],
-                            }
-                        )
-                        save_portfolio(portfolio)
-                        st.success(f"Bought {qty} dummy shares of **{label_to_show}**! Check the **🎮 Dummy** tab.")
+                        new_cash = round(portfolio["cash"] - actual_cost, 2)
+                        holding = {
+                            "id": str(int(now_ist().timestamp() * 1000)),
+                            "asset_type": "STOCK",
+                            "ticker": ticker_to_show,
+                            "name": label_to_show,
+                            "buy_price": sinfo["price"],
+                            "qty": qty,
+                            "invested": actual_cost,
+                            "buy_date": now_ist().strftime("%d %b, %I:%M %p"),
+                            "target_price": sinfo["sell_target"],
+                            "stop_loss": sinfo["stop_loss"],
+                        }
+                        db_record_buy(ACTIVE_USER, holding, new_cash, portfolio["total_deposited"])
+                        portfolio["cash"] = new_cash
+                        portfolio["holdings"].append(holding)
+                        st.success(f"Saved privately! Bought {qty} dummy shares of **{label_to_show}**.")
 
         render_searched_stock_live(full_ticker, display_name)
 
 # ==============================================================================
-# TAB 3: TOP 10 PROFITABLE SIPs, MUTUAL FUNDS & GOLD (TRADING HIDDEN WHEN CLOSED)
+# TAB 3: TOP 10 SIPs, MUTUAL FUNDS & GOLD
 # ==============================================================================
 with tab3:
     mf_news = fetch_live_news("India mutual fund SIP inflow top performing funds gold", max_items=6)
-
     with st.spinner("Loading Top 10 Profitable SIPs & Mutual Funds..."):
         mf_board = scan_top_mutual_funds()
 
     render_html('<div class="sec-title">🔥 SIPs & MFs On The Move</div>')
     if not mf_board.empty:
         hot_mfs = mf_board[mf_board["IsHot"]].head(4)
-        if hot_mfs.empty:
-            hot_mfs = mf_board.head(4)
-        render_mf_cards(hot_mfs, ranked=False)
+        render_mf_cards(hot_mfs if not hot_mfs.empty else mf_board.head(4), ranked=False)
 
     with st.expander("📰 Live Mutual Fund, SIP & Gold News"):
         if mf_news:
@@ -1522,18 +1851,14 @@ with tab3:
             render_mf_cards(top10_mf, ranked=True)
         else:
             top10_mf.insert(0, "Rank", range(1, len(top10_mf) + 1))
-            st.dataframe(
-                top10_mf[["Rank", "Fund Name", "Category", "Highlight", "Latest NAV (₹)", "1-Month (%)", "1-Year (%)", "3-Year (%/yr)", "₹5k/mo SIP Profit (3Y)"]],
-                use_container_width=True,
-                hide_index=True,
-            )
+            st.dataframe(top10_mf[["Rank", "Fund Name", "Category", "Highlight", "Latest NAV (₹)", "1-Month (%)", "1-Year (%)", "3-Year (%/yr)", "₹5k/mo SIP Profit (3Y)"]], use_container_width=True, hide_index=True)
 
     @st.fragment(run_every=AUTO_INTERVAL)
     def render_live_gold_etfs():
         render_html('<div class="sec-title">🪙 Gold, Silver & Nifty ETFs</div>')
         st.caption(f"⏱️ Live ETF Prices: {now_ist().strftime('%I:%M:%S %p IST')}" if MARKET_OPEN else "❄️ Frozen at Last Market Close")
 
-        portfolio = load_portfolio()
+        portfolio = get_session_portfolio()
         etf_cols = st.columns(2)
         for idx, (etf_ticker, (etf_title, etf_desc)) in enumerate(GOLD_AND_ETFS.items()):
             _, etf_info = fetch_single_stock_live(etf_ticker, MARKET_OPEN)
@@ -1543,20 +1868,11 @@ with tab3:
                         f"""
                         <div class="fin-card" style="margin-bottom:8px;">
                             <div class="fin-row">
-                                <div>
-                                    <div class="fin-name">{html.escape(etf_title)}</div>
-                                    <div class="fin-meta">{html.escape(etf_desc)}</div>
-                                </div>
-                                <div style="text-align:right;">
-                                    <div class="fin-price">₹{etf_info['price']:,.2f}</div>
-                                    {pct_pill(etf_info['daily_pct'], ' today')}
-                                </div>
+                                <div><div class="fin-name">{html.escape(etf_title)}</div><div class="fin-meta">{html.escape(etf_desc)}</div></div>
+                                <div style="text-align:right;"><div class="fin-price">₹{etf_info['price']:,.2f}</div>{pct_pill(etf_info['daily_pct'], ' today')}</div>
                             </div>
                             <div><span class="pill-tag">{html.escape(etf_info['move_badge'])}</span></div>
-                            <div class="fin-footer">
-                                <span>🎯 ₹{etf_info['sell_target']}</span>
-                                <span>🛡️ ₹{etf_info['stop_loss']}</span>
-                            </div>
+                            <div class="fin-footer"><span>🎯 ₹{etf_info['sell_target']}</span><span>🛡️ ₹{etf_info['stop_loss']}</span></div>
                         </div>
                         """
                     )
@@ -1565,26 +1881,26 @@ with tab3:
                             qty = int(5000 // etf_info["price"])
                             cost = round(qty * etf_info["price"], 2)
                             if qty > 0 and cost <= portfolio["cash"]:
-                                portfolio["cash"] = round(portfolio["cash"] - cost, 2)
-                                portfolio["holdings"].append(
-                                    {
-                                        "id": int(now_ist().timestamp() * 1000) + idx,
-                                        "asset_type": "ETF",
-                                        "ticker": etf_ticker,
-                                        "name": etf_title,
-                                        "buy_price": etf_info["price"],
-                                        "qty": qty,
-                                        "invested": cost,
-                                        "buy_date": now_ist().strftime("%d %b, %I:%M %p"),
-                                        "target_price": etf_info["sell_target"],
-                                        "stop_loss": etf_info["stop_loss"],
-                                    }
-                                )
-                                save_portfolio(portfolio)
-                                st.success(f"Invested ₹{cost:,.2f} dummy into {etf_title}!")
+                                new_cash = round(portfolio["cash"] - cost, 2)
+                                holding = {
+                                    "id": str(int(now_ist().timestamp() * 1000) + idx),
+                                    "asset_type": "ETF",
+                                    "ticker": etf_ticker,
+                                    "name": etf_title,
+                                    "buy_price": etf_info["price"],
+                                    "qty": qty,
+                                    "invested": cost,
+                                    "buy_date": now_ist().strftime("%d %b, %I:%M %p"),
+                                    "target_price": etf_info["sell_target"],
+                                    "stop_loss": etf_info["stop_loss"],
+                                }
+                                db_record_buy(ACTIVE_USER, holding, new_cash, portfolio["total_deposited"])
+                                portfolio["cash"] = new_cash
+                                portfolio["holdings"].append(holding)
+                                st.success(f"Saved privately! Invested ₹{cost:,.2f} dummy into {etf_title}.")
                                 st.rerun()
                             else:
-                                st.warning("Not enough dummy cash! Add more in **🎮 Dummy**.")
+                                st.warning("Not enough dummy cash!")
 
     render_live_gold_etfs()
 
@@ -1592,16 +1908,13 @@ with tab3:
     mf_choice_mode = st.selectbox("Pick a Popular Fund:", list(POPULAR_MFS.keys()))
     mf_search_text = st.text_input("Or search ANY Indian Mutual Fund:", placeholder="e.g. Axis Bluechip, Quant Mid Cap...")
 
-    selected_scheme_code = POPULAR_MFS[mf_choice_mode][0]
-    selected_mf_name = mf_choice_mode
-
+    selected_scheme_code, selected_mf_name = POPULAR_MFS[mf_choice_mode][0], mf_choice_mode
     if mf_search_text and len(mf_search_text.strip()) >= 3:
         mf_results = search_amfi_mutual_funds(mf_search_text)
         if mf_results:
             mf_map = {f"{m['schemeName']}": str(m["schemeCode"]) for m in mf_results}
             picked_mf = st.selectbox("Select matching AMFI Fund:", list(mf_map.keys()))
-            selected_scheme_code = mf_map[picked_mf]
-            selected_mf_name = picked_mf
+            selected_scheme_code, selected_mf_name = mf_map[picked_mf], picked_mf
 
     try:
         meta, mf_df, mf_info = fetch_mf_nav(selected_scheme_code)
@@ -1609,9 +1922,7 @@ with tab3:
         mf_df, mf_info = pd.DataFrame(), None
 
     if mf_info is not None and not mf_df.empty:
-        latest_nav = float(mf_df["nav"].iloc[-1])
-        latest_dt = mf_df.index[-1]
-
+        latest_nav, latest_dt = float(mf_df["nav"].iloc[-1]), mf_df.index[-1]
         sc1, sc2 = st.columns(2)
         sip_monthly = sc1.number_input("Monthly SIP (₹)", min_value=500, value=5000, step=500)
         sip_years = sc2.slider("Duration (Years)", 1, 5, 3)
@@ -1630,68 +1941,71 @@ with tab3:
             <div class="fin-card" style="margin:8px 0;">
                 <div class="fin-name">{html.escape(selected_mf_name)}</div>
                 <div class="fin-meta">Official NAV: ₹{latest_nav:,.2f} ({latest_dt.strftime('%d %b %Y')})</div>
-                <div class="fin-footer">
-                    <span>Invested: <b>₹{invested_sip:,.0f}</b></span>
-                    <span>Today: <b>₹{val_sip:,.0f}</b></span>
-                </div>
+                <div class="fin-footer"><span>Invested: <b>₹{invested_sip:,.0f}</b></span><span>Today: <b>₹{val_sip:,.0f}</b></span></div>
                 <div style="margin-top:6px;">Profit: <b>{rs_signed(profit_sip)}</b> {pct_pill(sip_pct)}</div>
             </div>
             """
         )
 
-        # MF Dummy Buy ONLY shown while Market is OPEN
         if MARKET_OPEN:
-            portfolio = load_portfolio()
+            portfolio = get_session_portfolio()
             mb1, mb2 = st.columns([1.5, 1])
-            mf_dummy_amt = mb1.number_input(
-                "Dummy MF Amount (₹)",
-                min_value=500.0,
-                max_value=max(500.0, float(portfolio["cash"])),
-                value=min(5000.0, max(500.0, float(portfolio["cash"]))),
-                step=500.0,
-                key="mf_dummy_amt",
-            )
+            mf_dummy_amt = mb1.number_input("Dummy MF Amount (₹)", min_value=500.0, max_value=max(500.0, float(portfolio["cash"])), value=min(5000.0, max(500.0, float(portfolio["cash"]))), step=500.0, key="mf_dummy_amt")
             if mb2.button("💸 Buy Dummy MF", type="primary", use_container_width=True):
                 if mf_dummy_amt <= portfolio["cash"]:
                     units = round(mf_dummy_amt / latest_nav, 4)
-                    portfolio["cash"] = round(portfolio["cash"] - mf_dummy_amt, 2)
-                    portfolio["holdings"].append(
-                        {
-                            "id": int(now_ist().timestamp() * 1000),
-                            "asset_type": "MF",
-                            "ticker": selected_scheme_code,
-                            "name": f"MF: {selected_mf_name[:42]}",
-                            "buy_price": round(latest_nav, 2),
-                            "qty": units,
-                            "invested": round(mf_dummy_amt, 2),
-                            "buy_date": now_ist().strftime("%d %b, %I:%M %p"),
-                            "target_price": round(latest_nav * 1.20, 2),
-                            "stop_loss": round(latest_nav * 0.85, 2),
-                        }
-                    )
-                    save_portfolio(portfolio)
-                    st.success(f"Invested ₹{mf_dummy_amt:,.2f} dummy into this Mutual Fund! Check **🎮 Dummy** tab.")
+                    new_cash = round(portfolio["cash"] - mf_dummy_amt, 2)
+                    holding = {
+                        "id": str(int(now_ist().timestamp() * 1000)),
+                        "asset_type": "MF",
+                        "ticker": selected_scheme_code,
+                        "name": f"MF: {selected_mf_name[:42]}",
+                        "buy_price": round(latest_nav, 2),
+                        "qty": units,
+                        "invested": round(mf_dummy_amt, 2),
+                        "buy_date": now_ist().strftime("%d %b, %I:%M %p"),
+                        "target_price": round(latest_nav * 1.20, 2),
+                        "stop_loss": round(latest_nav * 0.85, 2),
+                    }
+                    db_record_buy(ACTIVE_USER, holding, new_cash, portfolio["total_deposited"])
+                    portfolio["cash"] = new_cash
+                    portfolio["holdings"].append(holding)
+                    st.success(f"Saved privately! Invested ₹{mf_dummy_amt:,.2f} dummy into this Mutual Fund.")
                 else:
-                    st.error("Not enough dummy cash! Add more in **🎮 Dummy**.")
+                    st.error("Not enough dummy cash!")
 
 # ==============================================================================
-# TAB 4: DUMMY PORTFOLIO + INCREASE DUMMY VALUE (SELL HIDDEN WHEN CLOSED)
+# TAB 4: 100% PRIVATE PER-USER PERSONAL GOOGLE SHEET DUMMY PORTFOLIO
 # ==============================================================================
 with tab4:
     @st.fragment(run_every=AUTO_INTERVAL)
     def render_live_dummy_portfolio():
-        render_html('<div class="sec-title">🎮 My Dummy Portfolio</div>')
-        st.caption(f"⏱️ Live P&L Updated: {now_ist().strftime('%I:%M:%S %p IST')}" if MARKET_OPEN else "❄️ Frozen at Last Market Close (Trading Paused)")
-        portfolio = load_portfolio()
+        top_p1, top_p2 = st.columns([2, 1])
+        with top_p1:
+            render_html(f'<div class="sec-title">🎮 {html.escape(ACTIVE_USER["full_name"])}\'s Private Dummy Portfolio</div>')
+        if top_p2.button("☁️ Sync My Sheet", use_container_width=True):
+            st.session_state["user_portfolio"] = db_fetch_user_portfolio(ACTIVE_USER)
+            st.rerun()
 
+        has_personal_sheet = bool(ACTIVE_USER.get("personal_sheet_url", "").strip())
+        if _gsheets_configured():
+            if has_personal_sheet:
+                st.caption(f"🔒 Synced to **YOUR Personal Google Sheet** · [Open My Sheet]({ACTIVE_USER['personal_sheet_url']})")
+            else:
+                st.warning(
+                    "⚠️ **No Personal Google Sheet connected yet!** Your trades are currently session-only "
+                    "(never saved to anyone else's sheet). Connect your own Google Sheet below to save permanently!"
+                )
+        else:
+            st.caption("💾 Local Account Storage · Add Google Secrets on Streamlit Cloud for Personal Sheets.")
+
+        portfolio = get_session_portfolio()
         holdings = portfolio["holdings"]
-        total_invested = 0.0
-        total_current = 0.0
+        total_invested, total_current = 0.0, 0.0
         enriched_holdings = []
 
         for h in holdings:
-            asset_type = h.get("asset_type", "STOCK")
-            if asset_type == "MF":
+            if h.get("asset_type") == "MF":
                 try:
                     _, _, live_info = fetch_mf_nav(h["ticker"])
                 except Exception:
@@ -1703,11 +2017,7 @@ with tab4:
             cur_val = round(live_price * h["qty"], 2)
             pnl = round(cur_val - h["invested"], 2)
             pnl_pct = round((pnl / h["invested"]) * 100.0, 2) if h["invested"] > 0 else 0.0
-
-            if live_info:
-                sell_signal, sell_reason = predict_when_to_sell(h, live_info)
-            else:
-                sell_signal, sell_reason = "⏳ Updating...", "Waiting for market data."
+            sell_signal, sell_reason = predict_when_to_sell(h, live_info) if live_info else ("⏳ Updating...", "Waiting for quote.")
 
             total_invested += h["invested"]
             total_current += cur_val
@@ -1718,79 +2028,71 @@ with tab4:
         overall_pnl = total_net_worth - total_deposited
         holdings_pnl = total_current - total_invested
 
-        nw_cls = "kpi-sub-up" if overall_pnl >= 0 else "kpi-sub-down"
-        nw_arrow = "▲" if overall_pnl >= 0 else "▼"
-        hp_cls = "kpi-sub-up" if holdings_pnl >= 0 else "kpi-sub-down"
-        hp_arrow = "▲" if holdings_pnl >= 0 else "▼"
+        nw_cls, nw_arrow = ("kpi-sub-up", "▲") if overall_pnl >= 0 else ("kpi-sub-down", "▼")
+        hp_cls, hp_arrow = ("kpi-sub-up", "▲") if holdings_pnl >= 0 else ("kpi-sub-down", "▼")
 
         render_html(
             f"""
             <div class="grid-2col grid-2col-desktop4">
-                <div class="kpi-box">
-                    <div class="kpi-label">Virtual Net Worth</div>
-                    <div class="kpi-val">₹{total_net_worth:,.2f}</div>
-                    <div class="{nw_cls}">{nw_arrow} {rs_signed(overall_pnl)} P&amp;L</div>
-                </div>
-                <div class="kpi-box">
-                    <div class="kpi-label">Dummy Cash Left</div>
-                    <div class="kpi-val">₹{portfolio['cash']:,.2f}</div>
-                    <div class="kpi-sub-muted">Capital Added: ₹{total_deposited:,.0f}</div>
-                </div>
-                <div class="kpi-box">
-                    <div class="kpi-label">Currently Invested</div>
-                    <div class="kpi-val">₹{total_invested:,.2f}</div>
-                    <div class="kpi-sub-muted">{len(holdings)} active trades</div>
-                </div>
-                <div class="kpi-box">
-                    <div class="kpi-label">Holdings Value</div>
-                    <div class="kpi-val">₹{total_current:,.2f}</div>
-                    <div class="{hp_cls}">{hp_arrow} {rs_signed(holdings_pnl)}</div>
-                </div>
+                <div class="kpi-box"><div class="kpi-label">Virtual Net Worth</div><div class="kpi-val">₹{total_net_worth:,.2f}</div><div class="{nw_cls}">{nw_arrow} {rs_signed(overall_pnl)} P&amp;L</div></div>
+                <div class="kpi-box"><div class="kpi-label">Dummy Cash Left</div><div class="kpi-val">₹{portfolio['cash']:,.2f}</div><div class="kpi-sub-muted">Capital Added: ₹{total_deposited:,.0f}</div></div>
+                <div class="kpi-box"><div class="kpi-label">Currently Invested</div><div class="kpi-val">₹{total_invested:,.2f}</div><div class="kpi-sub-muted">{len(holdings)} active trades</div></div>
+                <div class="kpi-box"><div class="kpi-label">Holdings Value</div><div class="kpi-val">₹{total_current:,.2f}</div><div class="{hp_cls}">{hp_arrow} {rs_signed(holdings_pnl)}</div></div>
             </div>
             """
         )
 
-        # Wallet funding stays available so you can prepare your Dummy balance ahead of market open
+        # PERSONAL GOOGLE SHEET CONNECTION PANEL (100% PRIVATE PER USER)
+        if _gsheets_configured():
+            with st.expander("🔗 Connect / Change My Personal Google Sheet (100% Private)", expanded=not has_personal_sheet):
+                bot_email = get_bot_email()
+                st.markdown(
+                    "1. Create your own blank Google Sheet at **[sheets.new](https://sheets.new)**.\n"
+                    "2. Click **Share** → add this bot email as **Editor** → **Send**:"
+                )
+                st.code(bot_email, language=None)
+                new_sheet_input = st.text_input(
+                    "3. Paste YOUR Google Sheet URL here:",
+                    value=ACTIVE_USER.get("personal_sheet_url", ""),
+                    placeholder="https://docs.google.com/spreadsheets/d/...",
+                    key="personal_sheet_input",
+                )
+                if st.button("💾 Connect My Personal Google Sheet", type="primary", use_container_width=True):
+                    ok, msg = db_update_personal_sheet_url(ACTIVE_USER["username"], new_sheet_input, portfolio)
+                    if ok:
+                        st.session_state["auth_user"]["personal_sheet_url"] = new_sheet_input.strip()
+                        st.session_state["user_portfolio"] = db_fetch_user_portfolio(st.session_state["auth_user"])
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
         with st.expander("💰 Increase Dummy Account Value (Add Virtual Cash)", expanded=False):
-            st.caption("Adding virtual cash increases your Dummy Cash & Capital Added without skewing your real Profit/Loss.")
+            st.caption("Saved privately to your own Google Sheet without skewing your real Profit/Loss.")
             qc1, qc2, qc3 = st.columns(3)
-            if qc1.button("+ ₹50,000", use_container_width=True):
-                portfolio["cash"] = round(portfolio["cash"] + 50000.0, 2)
-                portfolio["total_deposited"] = round(total_deposited + 50000.0, 2)
-                save_portfolio(portfolio)
-                st.rerun()
-            if qc2.button("+ ₹1,00,000", use_container_width=True):
-                portfolio["cash"] = round(portfolio["cash"] + 100000.0, 2)
-                portfolio["total_deposited"] = round(total_deposited + 100000.0, 2)
-                save_portfolio(portfolio)
-                st.rerun()
-            if qc3.button("+ ₹5,00,000", use_container_width=True):
-                portfolio["cash"] = round(portfolio["cash"] + 500000.0, 2)
-                portfolio["total_deposited"] = round(total_deposited + 500000.0, 2)
-                save_portfolio(portfolio)
-                st.rerun()
+            for col_btn, amt in [(qc1, 50000.0), (qc2, 100000.0), (qc3, 500000.0)]:
+                if col_btn.button(f"+ ₹{amt:,.0f}", use_container_width=True, key=f"add_{int(amt)}"):
+                    new_c, new_d = round(portfolio["cash"] + amt, 2), round(total_deposited + amt, 2)
+                    db_add_cash(ACTIVE_USER, new_c, new_d)
+                    portfolio["cash"], portfolio["total_deposited"] = new_c, new_d
+                    st.rerun()
 
             ac1, ac2 = st.columns([1.6, 1])
-            custom_add = ac1.number_input("Or enter custom amount to add (₹):", min_value=1000.0, max_value=10000000.0, value=25000.0, step=5000.0, key="custom_cash_add")
+            custom_add = ac1.number_input("Custom amount to add (₹):", min_value=1000.0, max_value=10000000.0, value=25000.0, step=5000.0, key="custom_cash_add")
             if ac2.button("➕ Add Cash", type="primary", use_container_width=True):
-                portfolio["cash"] = round(portfolio["cash"] + float(custom_add), 2)
-                portfolio["total_deposited"] = round(total_deposited + float(custom_add), 2)
-                save_portfolio(portfolio)
-                st.success(f"Added ₹{custom_add:,.2f} dummy cash!")
+                new_c, new_d = round(portfolio["cash"] + float(custom_add), 2), round(total_deposited + float(custom_add), 2)
+                db_add_cash(ACTIVE_USER, new_c, new_d)
+                portfolio["cash"], portfolio["total_deposited"] = new_c, new_d
                 st.rerun()
 
         if not enriched_holdings:
-            if MARKET_OPEN:
-                st.info("No active dummy investments yet. Try a 1-tap trade in **⚡ Quick**, search in **🔍 Search**, or buy Gold/MF in **🪙 SIP**!")
-            else:
-                st.info("No active dummy investments. Trading opens at **9:15 AM IST (Mon–Fri)**.")
+            st.info("No active dummy investments." + (" Start in **⚡ Quick** or **🔍 Search**!" if MARKET_OPEN else " Trading opens at **9:15 AM IST (Mon–Fri)**."))
         else:
             render_html('<div class="sec-title">Active Holdings & Sell Alerts</div>')
             for h, live_price, cur_val, pnl, pnl_pct, sell_signal, sell_reason in enriched_holdings:
                 label = html.escape(h.get("name", h["ticker"]))
                 unit_word = "units" if h.get("asset_type") == "MF" else "shares"
-                pnl_cls = "pill-up" if pnl >= 0 else "pill-down"
-                pnl_arrow = "▲" if pnl >= 0 else "▼"
+                pnl_cls, pnl_arrow = ("pill-up", "▲") if pnl >= 0 else ("pill-down", "▼")
                 target_line = (
                     f"<span>🎯 Target: <b>₹{h['target_price']:,.2f}</b></span><span>🛡️ Stop: <b>₹{h['stop_loss']:,.2f}</b></span>"
                     if h.get("asset_type") != "MF"
@@ -1801,14 +2103,8 @@ with tab4:
                     f"""
                     <div class="fin-card" style="margin-bottom:8px;">
                         <div class="fin-row">
-                            <div>
-                                <div class="fin-name">{label}</div>
-                                <div class="fin-meta">{h['qty']} {unit_word} @ ₹{h['buy_price']:,.2f} · Last ₹{live_price:,.2f}</div>
-                            </div>
-                            <div style="text-align:right;">
-                                <div class="fin-price">₹{cur_val:,.2f}</div>
-                                <span class="{pnl_cls}">{pnl_arrow} {rs_signed(pnl)} ({pnl_pct:+.2f}%)</span>
-                            </div>
+                            <div><div class="fin-name">{label}</div><div class="fin-meta">{h['qty']} {unit_word} @ ₹{h['buy_price']:,.2f} · Last ₹{live_price:,.2f}</div></div>
+                            <div style="text-align:right;"><div class="fin-price">₹{cur_val:,.2f}</div><span class="{pnl_cls}">{pnl_arrow} {rs_signed(pnl)} ({pnl_pct:+.2f}%)</span></div>
                         </div>
                         <div><span class="pill-tag">{html.escape(sell_signal)}</span></div>
                         <div class="fin-meta" style="margin-top:5px;">{html.escape(sell_reason)}</div>
@@ -1817,23 +2113,22 @@ with tab4:
                     """
                 )
 
-                # Sell button ONLY visible while Indian Market is OPEN
                 if MARKET_OPEN:
                     if st.button(f"Sell Now (Dummy) — {h.get('name', h['ticker'])[:24]}", key=f"sell_{h['id']}", type="primary", use_container_width=True):
-                        portfolio["cash"] = round(portfolio["cash"] + cur_val, 2)
-                        portfolio["history"].append(
-                            {
-                                "Asset": h.get("name", h["ticker"]),
-                                "Qty": h["qty"],
-                                "Buy (₹)": h["buy_price"],
-                                "Sell (₹)": live_price,
-                                "P&L (₹)": pnl,
-                                "Return (%)": pnl_pct,
-                                "Sold On": now_ist().strftime("%d %b, %I:%M %p"),
-                            }
-                        )
-                        portfolio["holdings"] = [item for item in portfolio["holdings"] if item["id"] != h["id"]]
-                        save_portfolio(portfolio)
+                        new_cash = round(portfolio["cash"] + cur_val, 2)
+                        hist_row = {
+                            "Asset": h.get("name", h["ticker"]),
+                            "Qty": h["qty"],
+                            "Buy (₹)": h["buy_price"],
+                            "Sell (₹)": live_price,
+                            "P&L (₹)": pnl,
+                            "Return (%)": pnl_pct,
+                            "Sold On": now_ist().strftime("%d %b, %I:%M %p"),
+                        }
+                        db_record_sell(ACTIVE_USER, str(h["id"]), hist_row, new_cash, total_deposited)
+                        portfolio["cash"] = new_cash
+                        portfolio["holdings"] = [item for item in portfolio["holdings"] if str(item["id"]) != str(h["id"])]
+                        portfolio["history"].append(hist_row)
                         st.rerun()
 
         if portfolio["history"]:
@@ -1841,8 +2136,9 @@ with tab4:
             st.dataframe(pd.DataFrame(portfolio["history"]).iloc[::-1], use_container_width=True, hide_index=True)
 
         st.divider()
-        if st.button("🔁 Reset Dummy Wallet Back to ₹1,00,000", use_container_width=True):
-            save_portfolio({"cash": 100000.0, "total_deposited": 100000.0, "holdings": [], "history": []})
+        if st.button("🔁 Reset My Dummy Wallet Back to ₹1,00,000", use_container_width=True):
+            db_reset_user_wallet(ACTIVE_USER)
+            st.session_state["user_portfolio"] = {"cash": 100000.0, "total_deposited": 100000.0, "holdings": [], "history": []}
             st.rerun()
 
     render_live_dummy_portfolio()
